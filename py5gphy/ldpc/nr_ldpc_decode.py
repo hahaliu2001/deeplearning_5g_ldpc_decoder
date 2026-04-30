@@ -1,179 +1,47 @@
 # -*- coding:utf-8 -*-
+
 import numpy as np
-import scipy as sp
-import time
-
-from py5gphy.ldpc import ldpc_info
-from py5gphy.ldpc import ldpc_decoder_bit_flipping
 from py5gphy.crc import crc
-from py5gphy.ldpc import nr_ldpc_encode
+from py5gphy.ldpc import ldpc_info
+from py5gphy.ldpc import nr_ldpc_decoder
+from py5gphy.ldpc import ldpc_decoder_bit_flipping
+from py5gphy.ldpc import nr_ldpc_raterecover
 
-def nr_decode_ldpc(LLRin, Zc, bgn, L, algo='min-sum',alpha=1, beta=0):
+
+def nr_decode_ldpc(LLRin, B, Qm, rv, crcpoly, bgn, ldpcdecoder_config):
     """ LDPC decode following to TS38.212 5.3.2
-    ck = encode_ldpc(dn, bgn)
+    
     input: 
-        LLRin: N length LDPC decoder LLR input data
+        LLRin: E length LDPC decoder LLR input data
+        B: information bit size before LDPC encoding, which is also the input bit size for CRC decoding
+        Qm: modulation order, should be 1 for BPSK, 2 for QPSK, 4 for 16QAM, 6 for 64QAM, 8 for 256QAM
+        rv: redundancy version: 0, 1, 2, 3, which corresponds to the starting point shift for parity bits in LDPC encoding and rate matching
+        crcpoly: cyclic redundancy check type, should be "24A", "24B", "24C", only support 24-bit CRC for now
         bgn: base graph value 1 or 2
-        crcpoly: one of ['24A','24B','16']
-        algo: ["BF", "BP", "min-sum"]
+        ldpcdecoder_config: a dictionary containing the configuration for LDPC decoder, including:
+            L: iteration size
+            algo: decoding algorithm, one of ["BF","BP", "min-sum"]
+            alpha: (0:1] used for normalized min-sum. 
     output:
-        ck: K length LDPC decoded sequence
+        ck: B length LDPC decoded sequence
     
     """
-    assert bgn in [1,2]
-    assert algo in ['BF', 'BP', 'min-sum']
     
+    E = len(LLRin) # codeword length after LDPC encoding and rate matching, which is also the input bit size E
+    
+    assert E % Qm == 0, "the codeword length after LDPC encoding and rate matching should be a multiple of modulation order Qm"
+    assert bgn in [1, 2], "bgn should be 1 or 2"
+    assert crcpoly in ["24A", "24B", "24C"], "crc should be one of '24A', '24B', '24C'"
+    assert B % 8 == 0, "the information bit size after CRC should be a multiple of 8"
+    assert Qm in [1, 2, 4, 6, 8], "Qm should be one of 1, 2, 4, 6, 8"
+    assert rv in [0, 1, 2, 3], "rv should be one of 0, 1, 2, 3"
+
+    #support only single code block, which means the information bit size after CRC should be less than or equal to 8448 for base graph 1 and 3840 for base graph 2
     if bgn == 1:
-        N = Zc * 66
-        K = Zc * 22
-    else:
-        N = Zc * 50
-        K = Zc * 10
-    
-    assert N == LLRin.size
-    
-    #step 1: Find the set with index iLS in Table 5.3.2-1 which contains Zc
-    iLS = ldpc_info.find_iLS(Zc)
-    assert iLS < 8
-
-    #step 2 : get H
-    H = ldpc_info.getH(Zc, bgn, iLS)
-
-    #add punctured 2*Zc information bits to get full ldpc decoder input
-    newLLRin = np.concatenate([np.zeros(2*Zc), LLRin])
-
-    ck, status =  decode_ldpc(newLLRin, H, L, algo, alpha, beta)
-
-    blkandcrc = ck[0:K]
-    
-    return blkandcrc, ck, status
-
-def decode_ldpc(LLRin, H, L, algo='min-sum', alpha=1, beta=0):
-    """ LDPC decoder, support BF(bit flipping), BP(belief propagation), min-sum algorithms
-    BP is also named sum-product algorithm
-    input: 
-        LLRin: N length LDPC decoder LLR input data
-        H: LDPC matrix, 
-        L: iteration size
-        algo: one of ["BF", "BP", "min-sum"]
-        alpha: (0:1] used for normalized min-sum. 1 means no normalized
-        beta: >=0 used for offset min-sum, 0 means no offset
-    output:
-        ck: N length LDPC decoded sequence
-        status: True or False
-    """     
-    if algo == "BF":
-        ck, status = ldpc_decoder_bit_flipping.ldpc_decoder_BF(LLRin, H, L)
-        return ck, status
-    
-    #for soft decision decoder
-    M = H.shape[0]
-    N = H.shape[1]
-    
-    #validate
-    assert LLRin.size == N
-
-    #generate A list and B list
-    # A list contain sublist of all variable nodes index that connect to check node j
-    # correspondent to each line of H
-    #for examnple, A[0] is a list of variable nodes index that connect to check node 0
-    A=[]
-    for m in range(M):
-        idxlist = list(np.where(H[m,:] == 1)[0])
-        A.append(idxlist)
-    
-    # B list contain sublist of all check nodes index that connect to variable node i
-    # correspondent to each column of H
-    #for examnple, B[1] is a list of check nodes index that connect to variable node 1
-    B=[]
-    for n in range(N):
-        idxlist = list(np.where(H[:,n] == 1)[0])
-        B.append(idxlist)
-    
-    #init Lq, LQ, Lr
-    LQ = LLRin #decoded variable bits LLR
-
-    #Variable nodes to checking nodes LLR, Lq[m,n] = 0 if H[m,n]=0
-    #m is check node index, n is variable index, 
-    Lq = H*LLRin  
-    
-    #checking nodes to variable nodes, Lr[i,j] = 0 if H[i,j]=0
-    Lr = np.zeros((M,N)) 
-    
-    ck = np.zeros(N,'i1') #hard coded bits
-
-    for iter in range(L):
-        #LQ to ck hard coded bit
-        ck[LQ >= 0] = 0
-        ck[LQ < 0] = 1
-
-        #parity check first
-        S = (H @ ck.T) % 2    
-        if not np.any(S): 
-            #if S is all zero sequence, decoding success, return Tue
-            return ck, True
-
-        #variable nodes to checking nodes update
-        for m in range(M):
-            sel_Lq = Lq[m,A[m]]
-            
-            if algo == 'BP':
-                Lr = _BP_process(sel_Lq, A, Lr,m)
-            else:
-                Lr = _min_sum_process(sel_Lq, A, Lr,m, alpha, beta)
-        
-        #update LQ
-        LQ = LLRin + Lr.sum(axis=0)
-
-        #update Lq
-        for n in range(N):
-            for m in B[n]:
-                Lq[m,n] = LQ[n] - Lr[m,n]
-    
-    #LQ to ck hard coded bit
-    ck[LQ > 0] = 0
-    ck[LQ <= 0] = 1
-
-    #parity check
-    S = (H @ ck.T) % 2    
-    if not np.any(S): 
-        #if S is all zero sequence, decoding success, return Tue
-        return ck, True
-    else:
-        return ck, False
-
-def _BP_process(sel_Lq, A, Lr,m):
-    #calculate Lr with BP processing
-    
-    zero_value_list = list(np.where(sel_Lq==0)[0])
-    
-    if len(zero_value_list) == 0:
-        #normal case, no zero value
-        tanh_Lq = np.tanh(sel_Lq/2)
-        #tanh_Lq[tanh_Lq==0] = 10**(-22)
-        prod_v = np.prod(tanh_Lq)
-        for idx, n in enumerate(A[m]):
-            #tmp2 = np.prod(sel_Lq[0:idx]) * np.prod(sel_Lq[idx+1:])
-            tmp2 = prod_v/tanh_Lq[idx]
-            if tmp2 >= 1:
-                Lr[m,n] = 2 * 19.07 #atanh(1) = infinite, set 19.07 as maximum value
-            elif tmp2 <= -1:
-                Lr[m,n] = -2 * 19.07 #atanh(-1) = negative infinite, set 19.07 as maximum value
-            else:
-                Lr[m,n] = 2 * np.arctanh(tmp2)
-    elif len(zero_value_list) == 1:
-        tanh_Lq = np.tanh(sel_Lq/2)
-        #only one zero value, only zero value related Lr is non-zero
-        for idx, n in enumerate(A[m]):
-            Lr[m,n] = 0
-        zero_idx = zero_value_list[0]
-        Lr[m,A[m][zero_idx]] = np.prod(tanh_Lq[0:zero_idx]) * np.prod(tanh_Lq[zero_idx+1:])
-    else:
-        #>=2 zero values. all Lr are zero
-        for idx, n in enumerate(A[m]):
-            Lr[m,n] = 0
-    
-    return Lr
+        assert B <= 8448, "for base graph 1, the information bit size after CRC should be less than or equal to 8448"
+    else:        
+        assert B <= 3840, "for base graph 2, the information bit size after CRC should be less than or equal to 3840"
+    assert E >= B, "the codeword length after LDPC encoding and rate matching should be greater than or equal to the information bit size after CRC"
 
 def _min_sum_process(sel_Lq, A, Lr,m, alpha, beta):
     """ mixed min-sim processing
