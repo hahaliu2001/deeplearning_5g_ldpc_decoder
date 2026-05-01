@@ -23,7 +23,8 @@ def tx_rx_process(inbits, Qm, noise_power_db):
     
     # add AWGN noise to the modulated signal
     power_noise = 10 ** (noise_power_db / 10)
-    noise = np.random.normal(0, np.sqrt(power_noise), mod_data.shape)
+    noise = np.random.normal(0, np.sqrt(power_noise), mod_data.shape)/np.sqrt(2) + \
+            1j * np.random.normal(0, np.sqrt(power_noise), mod_data.shape)/np.sqrt(2) # complex AWGN noise
     noisy_signal = mod_data + noise
 
     # demodulation

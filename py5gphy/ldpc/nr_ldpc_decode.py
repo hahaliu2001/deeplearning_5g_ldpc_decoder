@@ -156,8 +156,10 @@ def _BP_process(sel_Lq, A, Lr,m):
             #tmp2 = np.prod(sel_Lq[0:idx]) * np.prod(sel_Lq[idx+1:])
             tmp2 = prod_v/tanh_Lq[idx]
             if tmp2 >= 1:
+                #print("Warning: tanh value is greater than or equal to 1, which may cause numerical issue for BP processing. Set Lr to maximum value")
                 Lr[m,n] = 2 * 19.07 #atanh(1) = infinite, set 19.07 as maximum value
             elif tmp2 <= -1:
+                #print("Warning: tanh value is less than or equal to -1, which may cause numerical issue for BP processing. Set Lr to minimum value")
                 Lr[m,n] = -2 * 19.07 #atanh(-1) = negative infinite, set 19.07 as maximum value
             else:
                 Lr[m,n] = 2 * np.arctanh(tmp2)
