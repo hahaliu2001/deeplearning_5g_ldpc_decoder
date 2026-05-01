@@ -2,16 +2,6 @@
 # coding: utf-8
 
 # The code is to simulate GEO backhaul LDPC decoder performance
-
-# Input parameters:
-# - Code rate: 1/4 and 1/5
-# - infomation bits size:
-# 
-
-# In[1]:
-
-
-# import libraries
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -21,53 +11,32 @@ import use_py5gphy_BP_minsum_LDPC_decoder
 import GEO_LDPC_encoder
 import GEO_layered_min_sum_ldpc_decoder
 
-
-# In[ ]:
-
-
 # LDPC parameters list
 #code_rate_list = [1/4, 1/5]  #code rate list
 code_rate_list = [1/5]  #code rate list
 #info_bit_list = [320,400,480,640,800,960,1280,3840,256,384,512,768] #information bit size list
-info_bit_list = [3840] #information bit size list
+info_bit_list = [256,640,1280,3840] #information bit size list
 
 #simulate parameters
 #snr_db_list = np.arange(-3.5, 0, 0.5).tolist()
-snr_db_list = np.arange(-4.5, -3, 0.5).tolist()
+snr_db_list = np.arange(-4.5, -2.5, 0.2).tolist()
 
-#LDPC decoder config list
-if (0):
-    LDPC_decoder_config_list = [
-        {"L": 32,"algo": "min-sum","alpha": 0.8,"beta": 0.3},
-        {"L": 32,"algo": "min-sum","alpha": 0.7,"beta": 0.3},
-        {"L": 16,"algo": "min-sum","alpha": 0.8,"beta": 0.3},
-        {"L": 16,"algo": "min-sum","alpha": 0.7,"beta": 0.3}
-    ]
-else:
-    LDPC_decoder_config_list = [
-        {"L": 32,"algo": "min-sum","alpha": 0.8,"beta": 0.3},
-        {"L": 32,"algo": "BP","alpha": 0.8,"beta": 0.3},
-    ]
+default_LDPC_decoder_config= {"L": 32,"algo": "min-sum","alpha": 0.8,"beta": 0}
 
 #test num
-test_num = 10 #numer of test for each test case
+test_num = 2000 #numer of test for each test case
 
 #choose algorithm
 algo_list = ["min-sum", "BP", "layered-min-sum"]
-#algo = "BP"
 
 #file name to save the simulation results
 result_file_name = f"LDPC_decoder_simulation_results"
 
 
 # ## main code to run the test
+def run_LDPC_decoder_test(B, code_rate, LDPC_decoder_config, snr_db):
 
-# In[4]:
-
-
-def run_LDPC_decoder_test(B, code_rate, LDPC_decoder_config, snr_db, algo="layered-min-sum"):
-
-    info_bits = np.random.randint(0, 2, B)
+    info_bits = np.random.randint(0, 2, B-24)
 
     #encode the information bits using Xona LDPC encoder
     xona_encoded_bits = GEO_LDPC_encoder.Xona_LDPC_encoder(info_bits, code_rate)
@@ -82,50 +51,43 @@ def run_LDPC_decoder_test(B, code_rate, LDPC_decoder_config, snr_db, algo="layer
 
     LLR_bits = 2 * received_signal / noise_power # assuming BPSK modulation
 
-    #decode the received bits using Xona LDPC decoder
-    LDPC_decoder_config["algo"] = algo
-    if algo == "min-sum":
-        decoded_bits, status = use_py5gphy_BP_minsum_LDPC_decoder.use_py5gphy_LDPC_decoder(LLR_bits, code_rate, LDPC_decoder_config)
-    elif algo == "BP":
-        decoded_bits, status = use_py5gphy_BP_minsum_LDPC_decoder.use_py5gphy_LDPC_decoder(LLR_bits, code_rate, LDPC_decoder_config)
-    elif algo == "layered-min-sum":
-        decoded_bits, status = GEO_layered_min_sum_ldpc_decoder.GEO_layered_min_sum_ldpc_decoder(LLR_bits, code_rate, LDPC_decoder_config)
+    c_status_list = []
+    for algo in algo_list:
+        #decode the received bits using Xona LDPC decoder
+        LDPC_decoder_config["algo"] = algo
+        if algo == "min-sum":
+            decoded_bits, status = use_py5gphy_BP_minsum_LDPC_decoder.use_py5gphy_LDPC_decoder(LLR_bits, code_rate, LDPC_decoder_config)
+        elif algo == "BP":
+            decoded_bits, status = use_py5gphy_BP_minsum_LDPC_decoder.use_py5gphy_LDPC_decoder(LLR_bits, code_rate, LDPC_decoder_config)
+        elif algo == "layered-min-sum":
+            decoded_bits, status = GEO_layered_min_sum_ldpc_decoder.GEO_layered_min_sum_ldpc_decoder(LLR_bits, code_rate, LDPC_decoder_config)
 
-    #if status == True:
-    #    assert np.array_equal(decoded_bits, info_bits), "Decoded bits do not match the original input bits for code rate {}, info bits {}, LDPC decoder config {}, SNR {}".format(code_rate, info_bits, LDPC_decoder_config, snr_db)
-    return decoded_bits[0:B], status
-
-
-# In[ ]:
+        c_status_list.append(status)
+    error_status = (np.array(c_status_list) == False).astype(int) # if status is False, it means decoding failed, which is counted as an error
+    return error_status
 
 
 test_config_list = []
 test_bler_list = []
 
-for algo in algo_list:
-    LDPC_decoder_config = {"L": 32,"algo": algo,"alpha": 0.8,"beta": 0.3}
-    for code_rate in code_rate_list:
-        for info_bits in info_bit_list:
-            test_config_list.append((code_rate, info_bits, LDPC_decoder_config))
-            test_bler = []
-            for snr_db in snr_db_list:
-                print("start simulation for rate ", code_rate, " ", info_bits, "bits", LDPC_decoder_config, " SNR: ", snr_db)
-                error_count = 0
-                for i in range(test_num):
-                    #print("Testing LDPC decoder with code rate: ", code_rate, " and info bits: ", info_bits)
-                    decoded_bits, status = run_LDPC_decoder_test(info_bits-24, code_rate, LDPC_decoder_config, snr_db,algo=algo)
+for code_rate in code_rate_list:
+    for info_bits in info_bit_list:
+        test_bler = []
+        for snr_db in snr_db_list:
+            print("start simulation for rate ", code_rate, " ", info_bits, "bits,NR: ", snr_db)
+            error_count = np.zeros(len(algo_list))
 
-                    error_count += (not status) # if status is False, it means decoding failed, which is counted as an error
+            for i in range(test_num):
+                LDPC_decoder_config = default_LDPC_decoder_config.copy()
+                #print("Testing LDPC decoder with code rate: ", code_rate, " and info bits: ", info_bits)
+                status = run_LDPC_decoder_test(info_bits, code_rate, LDPC_decoder_config, snr_db)
 
-                bler = error_count / test_num
-                test_bler.append(bler)
-                print("rate ", code_rate, " ", info_bits, "bits", LDPC_decoder_config, " SNR: ", snr_db, " BLER: ", bler)
-            test_bler_list.append(test_bler)                    
+                error_count += status # if status is False, it means decoding failed, which is counted as an error
 
-
-
-# In[15]:
-
+            bler = error_count / test_num
+            test_bler.append(bler)
+            print("rate ", code_rate, " ", info_bits, "bits", " SNR: ", snr_db, algo_list," BLER: ", bler)
+        test_bler_list.append(test_bler)                    
 
 # save the test results to a CSV file
 results_df = pd.DataFrame(test_bler_list, columns=snr_db_list)

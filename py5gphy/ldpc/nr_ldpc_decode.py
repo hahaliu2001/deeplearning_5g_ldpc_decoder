@@ -129,18 +129,12 @@ def decode_ldpc(LLRin, H, L, algo='min-sum', alpha=1, beta=0):
         for n in range(N):
             for m in B[n]:
                 Lq[m,n] = LQ[n] - Lr[m,n]
-    
-    #LQ to ck hard coded bit
-    ck[LQ > 0] = 0
-    ck[LQ <= 0] = 1
 
-    #parity check
-    S = (H @ ck.T) % 2    
-    if not np.any(S): 
-        #if S is all zero sequence, decoding success, return Tue
-        return ck, True
-    else:
-        return ck, False
+        ck, status = _do_parity_check(LQ, H)
+        if status:
+            return ck, status
+    
+    return ck, False
 
 def _BP_process(sel_Lq, A, Lr,m):
     #calculate Lr with BP processing
@@ -260,6 +254,25 @@ def for_test_5g_ldpc_encoder(Zc, bgn, snr_db,crcpoly='24A'):
     
 
     return blkandcrc, dn, LLRin
+
+def _do_parity_check(LQ, H):
+    N = LQ.size
+    #hard decision
+    ck = np.zeros(N,'i1') #hard coded bits
+    ck[LQ >= 0] = 0
+    ck[LQ < 0] = 1
+    
+    if not np.any(ck): 
+        #if all variables bits are 0, decoding failed, return False
+        return ck, False
+    
+    #parity check first
+    S = (H @ ck.T) % 2    
+    if not np.any(S): 
+        #if S is all zero sequence, decoding success, return Tue
+        return ck, True
+    else:
+        return ck, False
 
 if __name__ == "__main__":
     from scipy import io

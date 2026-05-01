@@ -24,8 +24,8 @@ def GEO_layered_min_sum_ldpc_decoder(LLR_bits, code_rate, LDPC_decoder_config):
     # next F bits are for the filler bits, which are set to max_LLR
     # last E-(B-2*Zc) bits are for the parity bits, which are the remaining LLR bits after removing the information bits 
     
-    #max_LLR = np.max(np.abs(LLR_bits)) * 10 # set the LLR for filler bits to be a large value to ensure they are decoded as 0
-    max_LLR = 127
+    max_LLR = np.max(np.abs(LLR_bits)) * 10 # set the LLR for filler bits to be a large value to ensure they are decoded as 0
+    #max_LLR = 127
     
     LLr_dn = np.zeros(2*Zc+N,dtype=np.float32)
     LLr_dn[2*Zc:B] = LLR_bits[0:B-2*Zc]
@@ -97,7 +97,7 @@ def _layered_min_sum_decoder(LLRin, B, H, L=16, alpha=1, beta=0):
             #update LQ with index that connect to layer m
             LQ[Alist[m]] = sel_Lq + Lr[m,Alist[m]]
 
-        if 0:
+        if 1:
             ck, status = _do_parity_check(LQ, H)
             if status:
                 return ck[0:B-24], status
@@ -105,6 +105,9 @@ def _layered_min_sum_decoder(LLRin, B, H, L=16, alpha=1, beta=0):
             #support CRC check after each iteration, if CRC check pass, return the decoded bits and status
             ck = np.zeros(B,'i1') #hard coded bits
             ck[LQ[0:B] < 0] = 1
+            if not np.any(ck): 
+                #if all variables bits are 0, decoding failed, return False
+                return ck, False
             blk,status = crc.nr_crc_decode(ck, '24A')
             if status==0:
                 return blk, status
@@ -165,6 +168,10 @@ def _do_parity_check(LQ, H):
     ck = np.zeros(N,'i1') #hard coded bits
     ck[LQ >= 0] = 0
     ck[LQ < 0] = 1
+    
+    if not np.any(ck): 
+        #if all variables bits are 0, decoding failed, return False
+        return ck, False
     
     #parity check first
     S = (H @ ck.T) % 2    

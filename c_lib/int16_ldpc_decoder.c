@@ -21,6 +21,7 @@ static int16_t sign_list[MAX_DEGREE]; // Sign list for the variable nodes connec
 static uint16_t column_list[MAX_DEGREE]; // Column indices for the variable nodes connected to a check node
 
 static void int16_fill_LLr_to_LQ(const int8_t *LLr, int16_t K,int16_t E, int16_t N, int16_t Zc, int16_t filling_LLr);
+static int16_t _do_parity_check(int16_t *LQ, uint16_t Zc,uint8_t *Vij_array);
 /*
  * Layered Min-Sum Decoder (Fixed-point int16)
  * LLr: Posterior LLRs (size N, int16_t)
@@ -30,7 +31,8 @@ static void int16_fill_LLr_to_LQ(const int8_t *LLr, int16_t K,int16_t E, int16_t
  * max_iter: Maximum number of iterations to perform
  
  */
-int32_t int16_layered_min_sum_decoder(int8_t *LLr, uint8_t *hardbits, int16_t K, int16_t E, int16_t max_iter,int16_t alpha,int16_t beta,int16_t filling_LLr) 
+int32_t int16_layered_min_sum_decoder(int8_t *LLr, uint8_t *hardbits, int16_t K, int16_t E, 
+    int16_t max_iter,int16_t alpha,int16_t beta,int16_t filling_LLr, int16_t en_crc_check) 
 {
     uint16_t Zc;
     uint8_t *Vij_array; 
@@ -145,18 +147,54 @@ int32_t int16_layered_min_sum_decoder(int8_t *LLr, uint8_t *hardbits, int16_t K,
         } // End of layered processing for this iteration
 
         // --- Early Termination (Syndrome Check) at the end of each iteration ---
-        for (int i = 0; i < K; i++) {
-            hardbits[i/8] = (hardbits[i/8] << 1) | (LQ[i] < 0 ? 1 : 0); // MSB first
-        }
+        if(en_crc_check) {
+            //calculate hard bits from LQ, and store in hardbits array, which is ceil(K/8) bytes, MSB first in each byte
+            for (int i = 0; i < K; i++) {
+                hardbits[i/8] = (hardbits[i/8] << 1) | (LQ[i] < 0 ? 1 : 0); // MSB first
+            }
 
-        //crc check
-        if(calculate_crc24a_fast(hardbits, K/8) == 0) {
-            return 0; // Converged successfully
+            //crc check
+            if(calculate_crc24a_fast(hardbits, K/8) == 0) {
+                return 0; // Converged successfully
+            }
+        }
+        else {
+            if(_do_parity_check(LQ, Zc, Vij_array)== 0) { // If parity check fails, continue to the next iteration, otherwise return success
+                return 0; // Converged successfully
+            }
+            
         }
 
     }
 
     return 1; // Failed to converge within max_iter
+}
+
+static int16_t _do_parity_check(int16_t *LQ, uint16_t Zc,uint8_t *Vij_array) {
+    uint8_t *HBGcolumns, *Vij;
+
+    //perform parity check using hard bits calculated from LQ and the parity-check matrix H
+    //return 1 if parity check pass, otherwise return 0
+    for (int HBG_row = 0; HBG_row < BG2_NUM_ROWS; HBG_row++) {
+        uint16_t offset = BG2_HBG_offset_array[HBG_row];
+        uint16_t degree = BG2_HBG_offset_array[HBG_row + 1] - offset;
+        HBGcolumns = BG2_HBG_array + offset;
+        Vij = Vij_array + offset;
+
+        for (int zx = 0; zx < Zc; zx++) {
+            int parity_sum = 0;
+            for (int j = 0; j < degree; j++) {
+                uint8_t shift = Vij[j];
+                uint16_t column = HBGcolumns[j] * Zc + ((shift + zx) % Zc);
+                parity_sum ^= (LQ[column] < 0) ? 1 : 0; // XOR for parity check
+            }
+            if (parity_sum != 0) {
+                return 1; // Parity check failed
+            }
+        }
+    }
+    
+    return 0; // All parity checks passed
 }
 
 static void int16_fill_LLr_to_LQ(const int8_t *LLr, int16_t K,int16_t E, int16_t N, int16_t Zc, int16_t filling_LLr) {
