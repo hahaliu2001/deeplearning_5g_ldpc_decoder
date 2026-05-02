@@ -8,7 +8,7 @@ from py5gphy.ldpc import ldpc_decoder_bit_flipping
 from py5gphy.crc import crc
 from py5gphy.ldpc import nr_ldpc_encode
 
-def nr_decode_ldpc(LLRin, Zc, bgn, L, algo='min-sum',alpha=1, beta=0):
+def nr_decode_ldpc(LLRin, Zc, bgn, crcpoly,ldpcdecoder_config={"L": 32,"algo": "min-sum","alpha": 0.8,"beta": 0}):
     """ LDPC decode following to TS38.212 5.3.2
     ck = encode_ldpc(dn, bgn)
     input: 
@@ -20,6 +20,11 @@ def nr_decode_ldpc(LLRin, Zc, bgn, L, algo='min-sum',alpha=1, beta=0):
         ck: K length LDPC decoded sequence
     
     """
+    L = ldpcdecoder_config["L"]
+    algo = ldpcdecoder_config["algo"]
+    alpha = ldpcdecoder_config["alpha"]
+    beta = ldpcdecoder_config["beta"]
+
     assert bgn in [1,2]
     assert algo in ['BF', 'BP', 'min-sum']
     
@@ -42,7 +47,10 @@ def nr_decode_ldpc(LLRin, Zc, bgn, L, algo='min-sum',alpha=1, beta=0):
     #add punctured 2*Zc information bits to get full ldpc decoder input
     newLLRin = np.concatenate([np.zeros(2*Zc), LLRin])
 
-    ck, status =  decode_ldpc(newLLRin, H, L, algo, alpha, beta)
+    if algo in [ "BF", "BP", "min-sum"]:
+         ck, status = ldpc_decoder_bit_flipping.ldpc_decoder_BF(newLLRin, H, L)
+    elif algo in ["layered-BP", "layered-min-sum"]:
+        ck, status =  decode_ldpc(newLLRin, H, L, algo, alpha, beta)
 
     blkandcrc = ck[0:K]
     

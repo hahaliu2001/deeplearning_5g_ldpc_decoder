@@ -72,7 +72,7 @@ def ldpc_5g_decode(LLRin, B, Qm, rv, crcpoly, bgn, ldpcdecoder_config,HARQ_on=Fa
             LLr_dn = LLr_dn + HARQ_buffer
         HARQ_buffer = LLr_dn.copy() # save the LLR for HARQ combining in next transmission
     
-    blkandcrc, ck, status = nr_ldpc_decode.nr_decode_ldpc(LLr_dn, Zc, bgn, ldpcdecoder_config["L"], algo=ldpcdecoder_config["algo"],alpha=ldpcdecoder_config["alpha"], beta=ldpcdecoder_config["beta"])
+    blkandcrc, ck, status = nr_ldpc_decode.nr_decode_ldpc(LLr_dn, Zc, bgn,crcpoly, ldpcdecoder_config)
 
     return blkandcrc, status, HARQ_buffer
 
