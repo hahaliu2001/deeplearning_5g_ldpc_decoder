@@ -13,7 +13,7 @@ from py5gphy.ldpc import nr_ldpc_raterecover
 from py5gphy.ldpc import nr_ldpc_ratematch
 
 
-def ldpc_5g_decode(LLRin, B, Qm, rv, crcpoly, bgn, ldpcdecoder_config,HARQ_on=False, HARQ_buffer=None):
+def cb_ldpc_5g_decode(LLRin, B, Qm, rv, crcpoly, bgn, ldpcdecoder_config,HARQ_on=False, HARQ_buffer=None):
     """ LDPC decode following to TS38.212 5.3.2
     
     input: 
@@ -72,7 +72,7 @@ def ldpc_5g_decode(LLRin, B, Qm, rv, crcpoly, bgn, ldpcdecoder_config,HARQ_on=Fa
             LLr_dn = LLr_dn + HARQ_buffer
         HARQ_buffer = LLr_dn.copy() # save the LLR for HARQ combining in next transmission
     
-    blkandcrc, ck, status = nr_ldpc_decode.nr_decode_ldpc(LLr_dn, Zc, bgn,crcpoly, ldpcdecoder_config)
+    blkandcrc, ck, status = nr_ldpc_decode.nr_decode_ldpc(LLr_dn, Zc, bgn,crcpoly, B,ldpcdecoder_config)
 
     return blkandcrc, status, HARQ_buffer
 
@@ -82,10 +82,10 @@ if __name__ == "__main__":
     
     Qm,B, noise_power_db = 4, 256, -20
     info_bits=np.random.randint(0, 2, size=B-24)
-    codeword = ldpc_5g_encoder.ldpc_5g_encode(info_bits=info_bits, E=1024, Qm=Qm, rv=0, crcpoly="24A", bgn=1)
+    codeword = ldpc_5g_encoder.cb_ldpc_5g_encode(info_bits=info_bits, E=1024, Qm=Qm, rv=0, crcpoly="24A", bgn=1)
     LLrout = ldpc_utils.tx_rx_process(codeword, Qm=Qm, noise_power_db=noise_power_db)
-    blkandcrc, status, _ = ldpc_5g_decode(LLrout, B=B, Qm=Qm, rv=0, crcpoly="24A", bgn=1, ldpcdecoder_config={"L": 32, "algo": "min-sum", "alpha": 0.7, "beta": 0.3})
+    blkandcrc, status, _ = cb_ldpc_5g_decode(LLrout, B=B, Qm=Qm, rv=0, crcpoly="24A", bgn=1, ldpcdecoder_config={"L": 32, "algo": "min-sum", "alpha": 0.7, "beta": 0.3})
+    print("ldpc decoder result: ", np.array_equal(info_bits, blkandcrc[0:len(info_bits)]))
 
-    codeword = ldpc_5g_encoder.ldpc_5g_encode(info_bits=np.random.randint(0, 2, size=8448-24), E=10240, Qm=2, rv=0, crcpoly="24A", bgn=1)
-    codeword = ldpc_5g_encoder.ldpc_5g_encode(info_bits=np.random.randint(0, 2, size=3840-24), E=5120, Qm=4, rv=0, crcpoly="24A", bgn=2)
+    
     pass

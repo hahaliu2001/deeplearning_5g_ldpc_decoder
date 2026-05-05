@@ -2,12 +2,16 @@
 import numpy as np
 import time
 
-def ldpc_decoder_BF(LLRin, H, L):
+from py5gphy.crc import crc
+
+def ldpc_decoder_BF(LLRin, H, L, crcpoly, B):
     """bit flipping decoding algorithm
        input:
             LLRin: N length LDPC decoder LLR input data
             H: M*N parity check matrix
             L: maximum iterations
+            crcpoly: crc
+            B: payload size after CRC
         output:
             ck: N size of decoded bits, 
             status: True or False
@@ -68,9 +72,13 @@ def ldpc_decoder_BF(LLRin, H, L):
 
         #bit flip any ck bits with En value==max_value
         ck[En==max_value] = 1- ck[En==max_value]
+
+        blk,status = crc.nr_crc_decode(ck, '24A')
+        if status == 0:
+            return blk, True
     
     #reach max iterations, and S still not all zero
-    return ck, False
+    return blk, False
 
 def for_test_ldpc_encoder(K, H, snr_db):
     ck = np.random.randint(2, size=K)

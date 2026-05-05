@@ -8,13 +8,14 @@ from py5gphy.ldpc import ldpc_decoder_bit_flipping
 from py5gphy.crc import crc
 from py5gphy.ldpc import nr_ldpc_encode
 
-def nr_decode_ldpc(LLRin, Zc, bgn, crcpoly,ldpcdecoder_config={"L": 32,"algo": "min-sum","alpha": 0.8,"beta": 0}):
+def nr_decode_ldpc(LLRin, Zc, bgn, crcpoly,B, ldpcdecoder_config={"L": 32,"algo": "min-sum","alpha": 0.8,"beta": 0}):
     """ LDPC decode following to TS38.212 5.3.2
     ck = encode_ldpc(dn, bgn)
     input: 
         LLRin: N length LDPC decoder LLR input data
         bgn: base graph value 1 or 2
         crcpoly: one of ['24A','24B','16']
+        B: payload size after CRC
         algo: ["BF", "BP", "min-sum"]
     output:
         ck: K length LDPC decoded sequence
@@ -47,16 +48,106 @@ def nr_decode_ldpc(LLRin, Zc, bgn, crcpoly,ldpcdecoder_config={"L": 32,"algo": "
     #add punctured 2*Zc information bits to get full ldpc decoder input
     newLLRin = np.concatenate([np.zeros(2*Zc), LLRin])
 
-    if algo in [ "BF", "BP", "min-sum"]:
-         ck, status = ldpc_decoder_bit_flipping.ldpc_decoder_BF(newLLRin, H, L)
+    if algo in [ "BF"]:
+         ck, status = ldpc_decoder_bit_flipping.ldpc_decoder_BF(newLLRin, H, crcpoly,L)
+    elif algo in ["BP", "min-sum"]:
+        ck, status =  decode_ldpc(newLLRin, H, L, crcpoly,algo, alpha, beta)
     elif algo in ["layered-BP", "layered-min-sum"]:
-        ck, status =  decode_ldpc(newLLRin, H, L, algo, alpha, beta)
+        ck, status =  layered_decode_ldpc(newLLRin, H, crcpoly,L, algo, alpha, beta)
 
     blkandcrc = ck[0:K]
     
     return blkandcrc, ck, status
 
 def decode_ldpc(LLRin, H, L, algo='min-sum', alpha=1, beta=0):
+    """ LDPC decoder, support BF(bit flipping), BP(belief propagation), min-sum algorithms
+    BP is also named sum-product algorithm
+    input: 
+        LLRin: N length LDPC decoder LLR input data
+        H: LDPC matrix, 
+        L: iteration size
+        algo: one of ["BF", "BP", "min-sum"]
+        alpha: (0:1] used for normalized min-sum. 1 means no normalized
+        beta: >=0 used for offset min-sum, 0 means no offset
+    output:
+        ck: N length LDPC decoded sequence
+        status: True or False
+    """     
+    if algo == "BF":
+        ck, status = ldpc_decoder_bit_flipping.ldpc_decoder_BF(LLRin, H, L)
+        return ck, status
+    
+    #for soft decision decoder
+    M = H.shape[0]
+    N = H.shape[1]
+    
+    #validate
+    assert LLRin.size == N
+
+    #generate A list and B list
+    # A list contain sublist of all variable nodes index that connect to check node j
+    # correspondent to each line of H
+    #for examnple, A[0] is a list of variable nodes index that connect to check node 0
+    A=[]
+    for m in range(M):
+        idxlist = list(np.where(H[m,:] == 1)[0])
+        A.append(idxlist)
+    
+    # B list contain sublist of all check nodes index that connect to variable node i
+    # correspondent to each column of H
+    #for examnple, B[1] is a list of check nodes index that connect to variable node 1
+    B=[]
+    for n in range(N):
+        idxlist = list(np.where(H[:,n] == 1)[0])
+        B.append(idxlist)
+    
+    #init Lq, LQ, Lr
+    LQ = LLRin #decoded variable bits LLR
+
+    #Variable nodes to checking nodes LLR, Lq[m,n] = 0 if H[m,n]=0
+    #m is check node index, n is variable index, 
+    Lq = H*LLRin  
+    
+    #checking nodes to variable nodes, Lr[i,j] = 0 if H[i,j]=0
+    Lr = np.zeros((M,N)) 
+    
+    ck = np.zeros(N,'i1') #hard coded bits
+
+    for iter in range(L):
+        #LQ to ck hard coded bit
+        ck[LQ >= 0] = 0
+        ck[LQ < 0] = 1
+
+        #parity check first
+        S = (H @ ck.T) % 2    
+        if not np.any(S): 
+            #if S is all zero sequence, decoding success, return Tue
+            return ck, True
+
+        #variable nodes to checking nodes update
+        for m in range(M):
+            sel_Lq = Lq[m,A[m]]
+            
+            if algo == 'BP':
+                Lr = _BP_process(sel_Lq, A, Lr,m)
+            else:
+                Lr = _min_sum_process(sel_Lq, A, Lr,m, alpha, beta)
+        
+        #update LQ
+        LQ = LLRin + Lr.sum(axis=0)
+
+        #update Lq
+        for n in range(N):
+            for m in B[n]:
+                Lq[m,n] = LQ[n] - Lr[m,n]
+
+        ck, status = _do_parity_check(LQ, H)
+        if status:
+            return ck, status
+    
+    return ck, False
+
+def layered_decode_ldpc(LLRin, H, L, algo='min-sum', alpha=1, beta=0):
     """ LDPC decoder, support BF(bit flipping), BP(belief propagation), min-sum algorithms
     BP is also named sum-product algorithm
     input: 

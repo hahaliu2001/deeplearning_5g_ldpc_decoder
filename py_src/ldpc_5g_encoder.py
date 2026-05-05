@@ -13,7 +13,7 @@ from py5gphy.crc import crc
 
 def cb_ldpc_5g_encode(info_bits, E, Qm, rv, crcpoly, bgn):
     """ 
-    summary: 5G LDPC encoding and rate matching
+    summary: one code block 5G LDPC encoding and rate matching
     By 5G spec, bgn selection is based on block block size and code rate. In this code, we indicate bgn as an input parameter for flexibility
     this code support only single code block, which means the information bit size after CRC should be less than or equal to 8448 for base graph 1 and 3840 for base graph 2
 
@@ -71,9 +71,9 @@ if __name__ == "__main__":
     "The code in this file is the same as the code in that repository"
     print("run LDPC 5G encoder")
 
-    codeword = ldpc_5g_encode(info_bits=np.random.randint(0, 2, size=256), E=1024, Qm=4, rv=0, crcpoly="24A", bgn=1)
-    codeword = ldpc_5g_encode(info_bits=np.random.randint(0, 2, size=8448-24), E=10240, Qm=2, rv=0, crcpoly="24A", bgn=1)
-    codeword = ldpc_5g_encode(info_bits=np.random.randint(0, 2, size=3840-24), E=5120, Qm=4, rv=0, crcpoly="24A", bgn=2)
+    codeword = cb_ldpc_5g_encode(info_bits=np.random.randint(0, 2, size=256), E=1024, Qm=4, rv=0, crcpoly="24A", bgn=1)
+    codeword = cb_ldpc_5g_encode(info_bits=np.random.randint(0, 2, size=8448-24), E=10240, Qm=2, rv=0, crcpoly="24A", bgn=1)
+    codeword = cb_ldpc_5g_encode(info_bits=np.random.randint(0, 2, size=3840-24), E=5120, Qm=4, rv=0, crcpoly="24A", bgn=2)
 
     pass
     
