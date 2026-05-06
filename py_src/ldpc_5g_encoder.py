@@ -28,16 +28,19 @@ def cb_ldpc_5g_encode(info_bits, E, Qm, rv, crcpoly, bgn):
     Returns:
         codeword: the codeword after LDPC encoding and rate matching, should be a 1D numpy array of size E
     """
-
     A = len(info_bits) # information bit size before CRC
-    B = A + 24 # information bit size after CRC, which is also the input bit size for LDPC encoding
-
     assert A % 8 == 0, "the information bit size before CRC should be a multiple of 8"
     assert bgn in [1, 2], "bgn should be 1 or 2"
-    assert crcpoly in ["24A", "24B", "24C"], "crc should be one of '24A', '24B', '24C'"
+    assert crcpoly in ["16","24A", "24B", "24C"], "crc should be one of '24A', '24B', '24C'"
     assert Qm in [1, 2, 4, 6, 8], "Qm should be one of 1, 2, 4, 6, 8"
     assert rv in [0, 1, 2, 3], "rv should be one of 0, 1, 2, 3"
     assert E % Qm == 0, "the codeword length after LDPC encoding and rate matching should be a multiple of modulation order Qm"
+
+    
+    if crcpoly == "16":
+        B = A + 16 # information bit size after CRC, which is also the input bit size for LDPC encoding
+    else:
+        B = A + 24 # information bit size after CRC, which is also the input bit size for LDPC encoding
 
     #support only single code block, which means the information bit size after CRC should be less than or equal to 8448 for base graph 1 and 3840 for base graph 2
     if bgn == 1:

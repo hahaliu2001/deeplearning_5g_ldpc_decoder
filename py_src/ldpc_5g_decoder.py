@@ -13,6 +13,7 @@ from py5gphy.ldpc import nr_ldpc_raterecover
 from py5gphy.ldpc import nr_ldpc_ratematch
 
 
+
 def cb_ldpc_5g_decode(LLRin, B, Qm, rv, crcpoly, bgn, ldpcdecoder_config,HARQ_on=False, HARQ_buffer=None):
     """ LDPC decode following to TS38.212 5.3.2
     
@@ -36,7 +37,7 @@ def cb_ldpc_5g_decode(LLRin, B, Qm, rv, crcpoly, bgn, ldpcdecoder_config,HARQ_on
     
     assert E % Qm == 0, "the codeword length after LDPC encoding and rate matching should be a multiple of modulation order Qm"
     assert bgn in [1, 2], "bgn should be 1 or 2"
-    assert crcpoly in ["24A", "24B", "24C"], "crc should be one of '24A', '24B', '24C'"
+    assert crcpoly in ["16","24A", "24B", "24C"], "crc should be one of '16','24A', '24B', '24C'"
     assert B % 8 == 0, "the information bit size after CRC should be a multiple of 8"
     assert Qm in [1, 2, 4, 6, 8], "Qm should be one of 1, 2, 4, 6, 8"
     assert rv in [0, 1, 2, 3], "rv should be one of 0, 1, 2, 3"
@@ -72,9 +73,9 @@ def cb_ldpc_5g_decode(LLRin, B, Qm, rv, crcpoly, bgn, ldpcdecoder_config,HARQ_on
             LLr_dn = LLr_dn + HARQ_buffer
         HARQ_buffer = LLr_dn.copy() # save the LLR for HARQ combining in next transmission
     
-    blkandcrc, ck, status = nr_ldpc_decode.nr_decode_ldpc(LLr_dn, Zc, bgn,crcpoly, B,ldpcdecoder_config)
+    blkWithoutCrc, status = nr_ldpc_decode.nr_decode_ldpc(LLr_dn, Zc, bgn,crcpoly, B,ldpcdecoder_config)
 
-    return blkandcrc, status, HARQ_buffer
+    return blkWithoutCrc, status, HARQ_buffer
 
 if __name__ == "__main__":
     import ldpc_5g_encoder
@@ -84,8 +85,21 @@ if __name__ == "__main__":
     info_bits=np.random.randint(0, 2, size=B-24)
     codeword = ldpc_5g_encoder.cb_ldpc_5g_encode(info_bits=info_bits, E=1024, Qm=Qm, rv=0, crcpoly="24A", bgn=1)
     LLrout = ldpc_utils.tx_rx_process(codeword, Qm=Qm, noise_power_db=noise_power_db)
-    blkandcrc, status, _ = cb_ldpc_5g_decode(LLrout, B=B, Qm=Qm, rv=0, crcpoly="24A", bgn=1, ldpcdecoder_config={"L": 32, "algo": "min-sum", "alpha": 0.7, "beta": 0.3})
-    print("ldpc decoder result: ", np.array_equal(info_bits, blkandcrc[0:len(info_bits)]))
+    
+    blkWithoutCrc, status, _ = cb_ldpc_5g_decode(LLrout, B=B, Qm=Qm, rv=0, crcpoly="24A", bgn=1, ldpcdecoder_config={"L": 32, "algo": "BF", "alpha": 0.7, "beta": 0.3})
+    print("ldpc decoder result: ", np.array_equal(info_bits, blkWithoutCrc[0:len(info_bits)]))
+    
+    blkWithoutCrc, status, _ = cb_ldpc_5g_decode(LLrout, B=B, Qm=Qm, rv=0, crcpoly="24A", bgn=1, ldpcdecoder_config={"L": 32, "algo": "BP", "alpha": 0.7, "beta": 0.3})
+    print("ldpc decoder result: ", np.array_equal(info_bits, blkWithoutCrc[0:len(info_bits)]))
+
+    blkWithoutCrc, status, _ = cb_ldpc_5g_decode(LLrout, B=B, Qm=Qm, rv=0, crcpoly="24A", bgn=1, ldpcdecoder_config={"L": 32, "algo": "min-sum", "alpha": 0.7, "beta": 0.3})
+    print("ldpc decoder result: ", np.array_equal(info_bits, blkWithoutCrc[0:len(info_bits)]))
+
+    blkWithoutCrc, status, _ = cb_ldpc_5g_decode(LLrout, B=B, Qm=Qm, rv=0, crcpoly="24A", bgn=1, ldpcdecoder_config={"L": 32, "algo": "layered-BP", "alpha": 0.7, "beta": 0.3})
+    print("ldpc decoder result: ", np.array_equal(info_bits, blkWithoutCrc[0:len(info_bits)]))
+
+    blkWithoutCrc, status, _ = cb_ldpc_5g_decode(LLrout, B=B, Qm=Qm, rv=0, crcpoly="24A", bgn=1, ldpcdecoder_config={"L": 32, "algo": "layered-min-sum", "alpha": 0.7, "beta": 0.3})
+    print("ldpc decoder result: ", np.array_equal(info_bits, blkWithoutCrc[0:len(info_bits)]))
 
     
     pass
