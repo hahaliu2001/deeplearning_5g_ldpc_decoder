@@ -100,6 +100,37 @@ def gen_LDPC_parameter(B, code_rate):
 
     return [E, N, Zc, num_filling_bits, H],[int(B), code_rate_str, int(BG), int(E), int(iLS), int(Kb), int(Zc), int(num_filling_bits), int(information_punctured_bits), int(information_bits_size), int(parity_bits_size)]
 
+def gen_BG1_HBG_idx_array():
+  """provide array with size and index of HBG matrix for BG1, which is used for C implementation
+  """
+
+  curpath = "py5gphy/ldpc/tables/"
+  filename = "BG1S0.mat1"
+  matfile = io.loadmat(curpath + filename)
+  BG = matfile["BG"]
+
+  datalist = []
+  offsetlist = []
+  offset = 0
+  
+  for i in range(BG.shape[0]):
+    data = BG[i, :]
+    nonzero_idx = np.nonzero(data > -1)[0]
+    datalist.extend(nonzero_idx.tolist() if hasattr(nonzero_idx, 'tolist') else list(nonzero_idx))
+    
+    offsetlist.append(offset)
+    offset += len(nonzero_idx)
+
+  with open("tables/BG1_HBG_table.txt", "w") as f:
+    str1 = ", ".join(f"{x:3d}" for x in datalist)
+    str1 = "{"+  str1 +"}"  
+    f.write(str1 + "\n")
+  
+  with open("tables/BG1_HBG_offset_table.txt", "w") as f:
+    str1 = ", ".join(f"{x:3d}" for x in offsetlist)
+    str1 = "{"+  str1 +"}"  
+    f.write(str1 + "\n")
+
 def gen_BG2_HBG_idx_array():
   """provide array with size and index of HBG matrix for BG2, which is used for C implementation
   """
