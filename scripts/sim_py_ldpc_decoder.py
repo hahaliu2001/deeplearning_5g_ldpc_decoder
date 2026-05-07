@@ -14,13 +14,13 @@ from py5gphy.common import nrModulation
 from py5gphy.demodulation import nr_Demodulation
 
 ################ define simulation parameters here ################
-A,E, Qm,rv,crcpoly, bgn  = 3840-24, 3840*5, 1, 0, "24A", 2
+A,E, Qm,rv,crcpoly, bgn  = 512-24, 512*5, 1, 0, "24A", 2
 
 default_ldpcdecoder_config = {"L": 32, "algo": "BP", "alpha": 0.8, "beta": 0}
 
-noise_power_db_list = np.arange(6, 7, 0.5) # noise power in dB for AWGN noise
+noise_power_db_list = np.arange(8, 5.2, -0.2) # noise power in dB for AWGN noise
 algo_list = ["BP", "min-sum"]
-test_num = 10
+test_num = 2000
 output_dir = "output/floating_algo_sim_results.pkl"
 
 def run_LDPC_decoder_test_no_HARQ(A,E, Qm, noise_power_db, rv, crcpoly, bgn):
