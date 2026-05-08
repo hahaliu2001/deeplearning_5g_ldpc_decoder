@@ -35,6 +35,19 @@ typedef struct {
     uint16_t iLS7Zc[5]; //lifting size Zc for iLS2     
 } table_5_3_2_1_t;
 
+typedef struct 
+{
+    /* input parameters for ldpc */ 
+    uint16_t bgn; // base graph number, 1 or 2
+    uint16_t A;   // transport block size in bits without CRC
+    uint16_t crctype; // crc type, [0,1,2,3] for [crc16, crc24a, crc24b, crc24c]
+    uint16_t E;   // number of bits to be transmitted after rate matching
+    uint16_t rv;  // redundancy version, [0,1,2,3]
+    uint16_t Qm;    // modulation order, [1,2,4,6,8] for [QPSK, 16QAM, 64QAM, 256QAM]
+    uint16_t HARQ_on; // HARQ on/off, 1 for on, 0 for off
+        
+} ldpc_in_config_t;
+
 /*ldpc parameters used for ldpc encoder/decoder and rate matching/rate recovery*/
 typedef struct 
 {
@@ -73,7 +86,7 @@ typedef struct
     int16_t filling_bit_value; //LLR value of the filling bits, expected to be a large positive value
     int16_t max_llr; //maximum LLR value for clipping, expected to be a large positive value
     int16_t min_llr; //minimum LLR value for clipping, expected to be a large negative value
-    uint8_t *decoded_bits_array; //output decoded bits array, length = K-F
+    
 } ldpc_decoder_cfg_t;
 
 extern uint16_t BG1_HBG_offset_array[BG1_NUM_ROWS+1];

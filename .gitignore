@@ -217,3 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .output/
+c_lib/*.o
+c_lib/*.so

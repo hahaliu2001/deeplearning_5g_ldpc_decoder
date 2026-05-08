@@ -9,7 +9,7 @@ SRCS = nr_crc.c \
 	   ldpc_tables.c \
 	   ldpc_internal.c \
 	   ldpc_rate_recovery.c \
-	   
+	   fixedpoint_ldpc_decoder.c \
 
 # Default build (Release)
 all: CFLAGS += -O3
