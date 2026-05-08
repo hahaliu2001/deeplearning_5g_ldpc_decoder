@@ -7,6 +7,8 @@ LIB_NAME = libnrLDPC.so
 #EXE_NAME = test_decoder
 SRCS = nr_crc.c \
 	   ldpc_tables.c \
+	   ldpc_internal.c \
+	   ldpc_rate_recovery.c \
 	   
 
 # Default build (Release)

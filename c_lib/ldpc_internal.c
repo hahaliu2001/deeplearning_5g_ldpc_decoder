@@ -6,17 +6,9 @@
 
 #include "ldpc_decoder.h"
 
-//Table 5.3.2-1: Sets of LDPC lifting size Z
-typedef struct {
-    uint16_t iLS0Zc[8]; //lifting size Zc for iLS0
-    uint16_t iLS1Zc[8]; //lifting size Zc for iLS1
-    uint16_t iLS2Zc[7]; //lifting size Zc for iLS2
-    uint16_t iLS3Zc[6]; //lifting size Zc for iLS2
-    uint16_t iLS4Zc[6]; //lifting size Zc for iLS2
-    uint16_t iLS5Zc[6]; //lifting size Zc for iLS2
-    uint16_t iLS6Zc[5]; //lifting size Zc for iLS2
-    uint16_t iLS7Zc[5]; //lifting size Zc for iLS2     
-} table_5_3_2_1_t;
+// pre-allocate HARQ memory for one code block, the size is BG1_NUM_COLS*MAX_ZC,
+// which is the maximum number of bits in one code block after LDPC encoding
+int16_t HARQ_memory[BG1_NUM_COLS*MAX_ZC]; 
 
 table_5_3_2_1_t table_5_3_2_1 = {
     .iLS0Zc = {2, 4, 8, 16, 32, 64, 128, 256},
@@ -53,8 +45,7 @@ void search_table_5_3_2_1(uint16_t B, uint16_t bgn, uint16_t *Zc, uint16_t *iLS)
     int sizes[] = {8, 8, 7, 6, 6, 6, 5, 5};
     uint16_t min_zc = UINT16_MAX;
     int best_set = -1;
-    int best_offset = -1;
-
+    
     for (int i = 0; i < 8; i++) {
         for (int j = 0; j < sizes[i]; j++) {
             uint16_t Zc = sets[i][j];
@@ -62,7 +53,7 @@ void search_table_5_3_2_1(uint16_t B, uint16_t bgn, uint16_t *Zc, uint16_t *iLS)
                 if (Zc < min_zc) {
                     min_zc = Zc;
                     best_set = i;
-                    best_offset = j;
+    
                 }
                 break; // No need to check larger Zc in this set
             }

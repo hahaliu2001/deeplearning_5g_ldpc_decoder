@@ -23,6 +23,18 @@
 #define MAX_LLR_I16 32767
 #define MIN_LLR_I16 -32768
 
+//Table 5.3.2-1: Sets of LDPC lifting size Z
+typedef struct {
+    uint16_t iLS0Zc[8]; //lifting size Zc for iLS0
+    uint16_t iLS1Zc[8]; //lifting size Zc for iLS1
+    uint16_t iLS2Zc[7]; //lifting size Zc for iLS2
+    uint16_t iLS3Zc[6]; //lifting size Zc for iLS2
+    uint16_t iLS4Zc[6]; //lifting size Zc for iLS2
+    uint16_t iLS5Zc[6]; //lifting size Zc for iLS2
+    uint16_t iLS6Zc[5]; //lifting size Zc for iLS2
+    uint16_t iLS7Zc[5]; //lifting size Zc for iLS2     
+} table_5_3_2_1_t;
+
 /*ldpc parameters used for ldpc encoder/decoder and rate matching/rate recovery*/
 typedef struct 
 {
@@ -64,9 +76,9 @@ typedef struct
     uint8_t *decoded_bits_array; //output decoded bits array, length = K-F
 } ldpc_decoder_cfg_t;
 
-extern uint16_t BG1_HBG_offset_array[BG2_NUM_ROWS+1];
-extern uint16_t BG1_HBG_array[BG2_MAX_NON_NULL_ELEMENTS];
-extern uint16_t BG1_HBG_Vij_array[8][BG2_MAX_NON_NULL_ELEMENTS];
+extern uint16_t BG1_HBG_offset_array[BG1_NUM_ROWS+1];
+extern uint16_t BG1_HBG_array[BG1_MAX_NON_NULL_ELEMENTS];
+extern uint16_t BG1_HBG_Vij_array[8][BG1_MAX_NON_NULL_ELEMENTS];
 
 extern uint16_t BG2_HBG_offset_array[BG2_NUM_ROWS+1];
 extern uint16_t BG2_HBG_array[BG2_MAX_NON_NULL_ELEMENTS];
@@ -75,5 +87,7 @@ extern uint16_t BG2_HBG_Vij_array[8][BG2_MAX_NON_NULL_ELEMENTS];
 extern uint32_t calculate_crc(const uint8_t *data, int len, int crctype);
 
 extern void get_LDPC_parameters(int16_t K, uint16_t *Zc, uint8_t **Vij_array);
+
+extern int16_t HARQ_memory[BG1_NUM_COLS*MAX_ZC]; 
 
 #endif /* _LDPC_DECODER_H_ */

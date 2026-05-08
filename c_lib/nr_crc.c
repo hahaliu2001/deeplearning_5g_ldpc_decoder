@@ -109,7 +109,7 @@ uint32_t calculate_crc(const uint8_t *data, int len, int crctype) {
     //crc16 encoding
     if (crctype==0) {
         uint32_t crc = 0;
-        for (size_t i = 0; i < len; i++) {
+        for (int i = 0; i < len; i++) {
             // Index = (Current MSB of CRC) XOR (Next Data Byte)
             uint8_t index = ((crc >> 8) ^ data[i]) & 0xFF;
             // Shift CRC left by 8 bits and XOR with table value
@@ -120,7 +120,7 @@ uint32_t calculate_crc(const uint8_t *data, int len, int crctype) {
 
     //crc24 encoding
     uint32_t crc = 0;
-    for (size_t i = 0; i < len; i++) {
+    for (int i = 0; i < len; i++) {
         // Index = (Current MSB of CRC) XOR (Next Data Byte)
         uint8_t index = ((crc >> 16) ^ data[i]) & 0xFF;
         // Shift CRC left by 8 bits and XOR with table value
