@@ -108,19 +108,7 @@ def decode_ldpc(LLRin, H, L, crcpoly, B, algo='min-sum', alpha=1, beta=0):
     #checking nodes to variable nodes, Lr[i,j] = 0 if H[i,j]=0
     Lr = np.zeros((M,N)) 
     
-    ck = np.zeros(N,'i1') #hard coded bits
-
     for iter in range(L):
-        #LQ to ck hard coded bit
-        ck[LQ >= 0] = 0
-        ck[LQ < 0] = 1
-
-        #parity check first
-        S = (H @ ck.T) % 2    
-        if not np.any(S): 
-            #if S is all zero sequence, decoding success, return Tue
-            return ck, True
-
         #variable nodes to checking nodes update
         for m in range(M):
             sel_Lq = Lq[m,Alist[m]]

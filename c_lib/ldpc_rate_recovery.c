@@ -5,9 +5,9 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "ldpc_decoder.h"
+#include "nr_ldpc.h"
 
-void nr_ldpc_rate_recover_harq_combine(ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg, int16_t *input_LLr) {
+void nr_ldpc_rate_recover_harq_combine(ldpc_config_t *config, int16_t filling_bit_value, int16_t *input_LLr) {
     // This function performs LDPC rate recovery based on the input configuration and input LLR.
     // The output bits are stored in HARQ_memory.
 
@@ -24,7 +24,7 @@ void nr_ldpc_rate_recover_harq_combine(ldpc_config_t *config, ldpc_decoder_cfg_t
 
     //fill filling bits with filling_bit_LLRvalue
     for (uint16_t i = 0; i < config->F; i++) {
-        HARQ_memory[config->B+i] = decoder_cfg->filling_bit_value;
+        HARQ_memory[config->B+i] = filling_bit_value;
     }
 
     //rate matching data is [2*Zc:B,K:E]

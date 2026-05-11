@@ -11,6 +11,41 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal"
+        },
+        {
+      "name": "(gdb) python Attach",
+      "type": "cppdbg",
+      "request": "attach",
+      "program": "/usr/bin/python3", // Path to your python interpreter
+      "processId": "${command:pickProcess}",
+      "MIMode": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+        
+      ],
+      "externalConsole": false,
+      "console": "integratedTerminal"
+    },
+    {
+            "name": "(gdb) c file Launch",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${fileDirname}/test_ldpc_5g_decoder", // Path to executable
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "MIMode": "gdb",
+            "environment": [
+                {
+                    "name": "LD_LIBRARY_PATH",
+                    "value": "${workspaceFolder}/c_lib:${env:LD_LIBRARY_PATH}"
+                }
+            ]
+            //"preLaunchTask": "C/C++: gcc build active file" // Matches tasks.json label
         }
     ]
 }

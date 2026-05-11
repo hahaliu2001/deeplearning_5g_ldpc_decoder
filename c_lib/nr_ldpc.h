@@ -99,8 +99,15 @@ extern uint16_t BG2_HBG_Vij_array[8][BG2_MAX_NON_NULL_ELEMENTS];
 
 extern uint32_t calculate_crc(const uint8_t *data, int len, int crctype);
 
-extern void get_LDPC_parameters(int16_t K, uint16_t *Zc, uint8_t **Vij_array);
-
 extern int16_t HARQ_memory[BG1_NUM_COLS*MAX_ZC]; 
 
+extern int gen_ldpc_parameters(ldpc_config_t *params, ldpc_in_config_t *inconfig );
+extern int32_t layered_minsum_ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg);
+extern int32_t layered_BP_ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg);
+extern void nr_ldpc_rate_recover_harq_combine(ldpc_config_t *config, int16_t filling_bit_value, int16_t *input_LLr);
+extern int32_t c_ldpc_5g_decode(int16_t *LLr, uint8_t *hardbits, ldpc_in_config_t *inconfig, ldpc_decoder_cfg_t *decoder_config);
+
+extern void nr_ldpc_rate_match(uint8_t *inbits, uint8_t *outbytes,ldpc_config_t *config);
+extern int32_t nr_ldpc_encode(uint8_t *in_bits, uint8_t *out_bits, ldpc_config_t *ldpc_config);
+extern int32_t c_ldpc_5g_encode(uint8_t *infobytes, uint8_t *rm_bytes, ldpc_in_config_t *inconfig);
 #endif /* _LDPC_DECODER_H_ */

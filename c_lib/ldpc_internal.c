@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "ldpc_decoder.h"
+#include "nr_ldpc.h"
 
 // pre-allocate HARQ memory for one code block, the size is BG1_NUM_COLS*MAX_ZC,
 // which is the maximum number of bits in one code block after LDPC encoding
@@ -12,13 +12,13 @@ int16_t HARQ_memory[BG1_NUM_COLS*MAX_ZC];
 
 table_5_3_2_1_t table_5_3_2_1 = {
     .iLS0Zc = {2, 4, 8, 16, 32, 64, 128, 256},
-    .iLS1Zc = {2, 4, 8, 16, 32, 64, 128, 256},
-    .iLS2Zc = {2, 4, 8, 16, 32, 64, 128},
-    .iLS3Zc = {2, 4, 8, 16, 32, 64},
-    .iLS4Zc = {2, 4, 8, 16, 32, 64},
-    .iLS5Zc = {2, 4, 8, 16, 32, 64},
-    .iLS6Zc = {2, 4, 8, 16, 32},
-    .iLS7Zc = {2, 4, 8, 16, 32}
+    .iLS1Zc = {3, 6, 12, 24, 48, 96, 192, 384},
+    .iLS2Zc = {5, 10, 20, 40, 80, 160, 320},
+    .iLS3Zc = {7, 14, 28, 56, 112, 224},
+    .iLS4Zc = {9, 18, 36, 72, 144, 288},
+    .iLS5Zc = {11, 22, 44, 88, 176, 352},
+    .iLS6Zc = {13, 26, 52, 104, 208},
+    .iLS7Zc = {15, 30, 60, 120, 240}
 };
 
 void search_table_5_3_2_1(uint16_t B, uint16_t bgn, uint16_t *Zc, uint16_t *iLS) {
@@ -63,8 +63,16 @@ void search_table_5_3_2_1(uint16_t B, uint16_t bgn, uint16_t *Zc, uint16_t *iLS)
     *iLS = best_set;
 }
 
-int gen_ldpc_parameters(ldpc_config_t *params, 
-    uint16_t A, uint16_t bgn, uint16_t crctype, uint16_t E, uint16_t rv, uint16_t Qm, uint16_t HARQ_on) {
+int gen_ldpc_parameters(ldpc_config_t *params, ldpc_in_config_t *inconfig ) {
+    //read input parameters
+    uint16_t bgn = inconfig->bgn;
+    uint16_t A = inconfig->A;
+    uint16_t crctype = inconfig->crctype;
+    uint16_t E = inconfig->E;
+    uint16_t rv = inconfig->rv;
+    uint16_t Qm = inconfig->Qm;
+    uint16_t HARQ_on = inconfig->HARQ_on;
+    
     // Set input parameters
     params->A = A;
     params->bgn = bgn;

@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "ldpc_decoder.h"
+#include "nr_ldpc.h"
 /*below tables come from 3gpp TS38.212 table5.3.2-2 LDPC HBG matrix for base graph 2
 the HBG martrix contain 42 rows and 46 columns with most of the elements being -1 (NULL) */
 

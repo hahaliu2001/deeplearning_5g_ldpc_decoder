@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "ldpc_decoder.h"
+#include "nr_ldpc.h"
 
 /*define the arrays used for LDPC decoder*/
 //LQ is the array for storing the LLRs for variable nodes, and its max size is 68*384, which is the maximum number of variable nodes in the code. The actual number of variable nodes used in a specific code will be determined by the code parameters (K and N).
@@ -87,7 +87,7 @@ void _min_sum_update(uint16_t degree, int16_t *rel_Lq,
     }
 }
 
-int32_t ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg) {
+int32_t layered_minsum_ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg) {
     // This function performs LDPC decoding based on the input configuration and input LLR.
     // The output bits are stored in hardbits.
     uint16_t non_zero_elements;
@@ -147,22 +147,17 @@ int32_t ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *config, ldpc
 
                 //update Lr, fixed point only support min-sum algorithm for now, 
                 //no need to calculate tanh and atanh, which is computationally expensive
-                if(decoder_cfg->algo == 1) {
-                    _min_sum_update(degree, rel_Lq, sel_lr, 
+                _min_sum_update(degree, rel_Lq, sel_lr, 
                         decoder_cfg->alpha, decoder_cfg->beta, 
                         decoder_cfg->max_llr, decoder_cfg->min_llr, 
                         column_list, LQ);
-                }
-                else {
-                    // Unsupported algorithm
-                    return -1;
-                }
+                
             } // End of processing for this HBG row
         } // End of layered processing for this iteration
         
         // --- Early Termination (Syndrome Check) at the end of each iteration ---
         //calculate hard bits from LQ, and store in hardbits array, which is ceil(K/8) bytes, MSB first in each byte
-        for (int i = 0; i < config->K; i++) {
+        for (int i = 0; i < config->B; i++) {
             hardbits[i/8] = (hardbits[i/8] << 1) | (LQ[i] < 0 ? 1 : 0); // MSB first
         }
         
