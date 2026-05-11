@@ -67,7 +67,7 @@ def test_nr_ldpc_encoder(A, E, Qm, rv, crcpoly, bgn):
     c_ldpc_status = libnrLDPC.c_ldpc_5g_encode(info_bytes,c_rmbytes,ldpc_in_config)
     c_rm_bits = np.unpackbits(c_rmbytes, bitorder='big')
 
-    np.array_equal(py_codeword, c_rm_bits[0:E])
+    print(np.array_equal(py_codeword, c_rm_bits[0:E]))
     pass
 
 if __name__ == "__main__":
