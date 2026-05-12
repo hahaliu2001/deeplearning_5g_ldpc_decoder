@@ -130,7 +130,7 @@ def decode_ldpc(LLRin, H, L, crcpoly, B, algo='min-sum', alpha=1, beta=0):
         ck[LQ[0:B] < 0] = 1
         blk,status = crc.nr_crc_decode(ck, crcpoly)
         if status==0:
-            return blk, status
+            return blk, True
     
     return blk, False
 
@@ -199,7 +199,7 @@ def layered_decode_ldpc(LLRin, H, crcpoly, B, L, algo='min-sum', alpha=1, beta=0
         ck[LQ[0:B] < 0] = 1
         blk,status = crc.nr_crc_decode(ck, crcpoly)
         if status==0:
-            return blk, status
+            return blk, True
     
     return ck, False
 
