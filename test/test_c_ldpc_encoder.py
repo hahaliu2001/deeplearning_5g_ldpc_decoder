@@ -38,7 +38,7 @@ libnrLDPC.c_ldpc_5g_encode.argtypes = [
 ]
 libnrLDPC.c_ldpc_5g_encode.restype = ctypes.c_int32
 
-set_flag = 0
+set_flag = 1
 def test_nr_ldpc_encoder(A, E, Qm, rv, crcpoly, bgn):
         
     if set_flag:
@@ -62,16 +62,28 @@ def test_nr_ldpc_encoder(A, E, Qm, rv, crcpoly, bgn):
     ldpc_in_config.Qm = Qm
     ldpc_in_config.HARQ_on = 0
 
-    print(f"DEBUG: Attach GDB to Process ID (PID): {os.getpid()}")
+    #print(f"DEBUG: Attach GDB to Process ID (PID): {os.getpid()}")
     c_rmbytes = np.zeros(int((E+7)//8), dtype=np.uint8)
     c_ldpc_status = libnrLDPC.c_ldpc_5g_encode(info_bytes,c_rmbytes,ldpc_in_config)
     c_rm_bits = np.unpackbits(c_rmbytes, bitorder='big')
 
-    print(np.array_equal(py_codeword, c_rm_bits[0:E]))
+    assert np.array_equal(py_codeword, c_rm_bits[0:E])
     pass
 
 if __name__ == "__main__":
     print("start test c-code of nr ldpc encoder ")
-    A,E, Qm,rv,crcpoly, bgn  = 512-24, 512*3, 1, 0, "24A", 1
-    test_nr_ldpc_encoder(A, E, Qm, rv, crcpoly, bgn)
+    #A,E, Qm,rv,crcpoly, bgn  = 512-24, 512*3, 4, 0, "24A", 1
+    Zlist = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, \
+            26, 28, 30, 32, 36, 40, 44, 48, 52, 56, 60, 64, 72, 80, 88, 96, 104, \
+            112, 120, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384]
+    for Zc in Zlist:
+        for bgn in [1,2]:
+             for crcpoly in ["16", "24A", "24B", "24C"]:
+                  for rv in [0,1,2,3]:
+                       for coderate in [1/8,1/5,1/3,1/2,1]:
+                            for Qm in [1,2,4,6,8]:
+                                A = 24*Zc
+                                E = int((A+48)/coderate)
+                                print(f"test: A={A},E={E}, Qm={Qm},rv={rv},{crcpoly}, bgn={bgn}")
+                                test_nr_ldpc_encoder(A, E, Qm, rv, crcpoly, bgn)
     pass

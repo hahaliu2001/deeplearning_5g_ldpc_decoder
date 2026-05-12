@@ -3,6 +3,7 @@ from logging import config
 import sys
 import numpy as np
 import pytest
+import time
 
 import ctypes
 import os
@@ -88,8 +89,11 @@ def test_bgn1_nr_ldpc_decoder():
 
     #python decoder
     ldpcdecoder_config = {"L": 32, "algo": "layered-min-sum", "alpha": 1, "beta": 0}
+    start = time.perf_counter()
     blkandcrc_py, status_py, _ = ldpc_5g_decoder.cb_ldpc_5g_decode(LLr_dn_c, B=A+24, Qm=Qm, rv=rv, 
                                         crcpoly=crcpoly, bgn=bgn, ldpcdecoder_config=ldpcdecoder_config)
+    end = time.perf_counter()
+    print(f"python cb_ldpc_5g_decode Time usage: {(end - start) * 1000:.3f} ms")
 
     #prepare config struct for C implementation
     
@@ -105,19 +109,21 @@ def test_bgn1_nr_ldpc_decoder():
     #prepare decoder config struct for C implementation
     
     decoder_config = DecoderConfig()
-    decoder_config.L = 32
     decoder_config.algo = 1 # 0 for layered-BP, 1 for layered-min-sum
+    decoder_config.max_iterations = 32
     decoder_config.alpha = np.uint16(0.7 * 32767)
     decoder_config.beta = np.uint16(0 * 32767)
     decoder_config.filling_bit_value = 128*20 # the LLR value for filling bits in rate recovery, which can be set to 0 for HARQ combining
-    decoder_config.max_iterations = 32
     decoder_config.max_llr = 32767 # the maximum LLR value for input to LDPC decoder, which is set to 127 for int8 implementation in C
     decoder_config.min_llr = -32768 # the minimum LLR value for input to LDPC decoder, which is
 
     hardbits_c = np.zeros(int(A//8+3), dtype=np.uint8) # output bits from C implementation
-    print(f"DEBUG: Attach GDB to Process ID (PID): {os.getpid()}")
+    #print(f"DEBUG: Attach GDB to Process ID (PID): {os.getpid()}")
     #input("Press Enter to start C call...")
+    start = time.perf_counter()
     c_ldpc_status = libnrLDPC.c_ldpc_5g_decode(LLr_dn_c, hardbits_c, ctypes.byref(ldpc_in_config), ctypes.byref(decoder_config))
+    end = time.perf_counter()
+    print(f"python cb_ldpc_5g_decode Time usage: {(end - start) * 1000:.3f} ms")
     c_decoded_bits = np.unpackbits(hardbits_c, bitorder='big')
 
     np.array_equal(info_bits, c_decoded_bits[0:A]), "Decoded bits from C implementation do not match Python implementation"

@@ -33,7 +33,7 @@ void nr_ldpc_rate_match(uint8_t *inbits, uint8_t *outbytes,ldpc_config_t *config
     int j = 0;
     while(k < E) {
         int pos = (k0+j) % N;
-        if(pos < B-2*Zc || pos > K) {
+        if(pos < B-2*Zc || pos >= K-2*Zc) {
             //not filling bit
             ek[k++] = rm_in[pos];
         }

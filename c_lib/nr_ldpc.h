@@ -85,6 +85,8 @@ typedef struct
     uint16_t beta; //offset for offset min-sum algorithm, in fixed point with 8 fractional bits, e.g., beta = 0.25 -> 64
     int16_t filling_bit_value; //LLR value of the filling bits, expected to be a large positive value
     int16_t max_llr; //maximum LLR value for clipping, expected to be a large positive value
+                    //max_llr is also used as scaling factor for floating point BP algorithm
+                    //all LLr value divide by max_llr 
     int16_t min_llr; //minimum LLR value for clipping, expected to be a large negative value
     
 } ldpc_decoder_cfg_t;

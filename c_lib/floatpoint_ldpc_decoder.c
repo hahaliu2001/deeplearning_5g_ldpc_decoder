@@ -28,9 +28,9 @@ void _BP_update(uint16_t degree, float *rel_Lq,
     //and also calculate the overall sign
     int16_t zero_idx = -1;
     int16_t num_zeros = 0;
-    float tanh_prod = 1;
+    float tanh_prod = 1.0f;
     for (int j = 0; j < degree; j++) {
-        if(0 == rel_Lq[j]) {
+        if(0.0f == rel_Lq[j]) {
             num_zeros++;
             zero_idx = j;
         } else {
@@ -44,26 +44,49 @@ void _BP_update(uint16_t degree, float *rel_Lq,
     //
         for (int j = 0; j < degree; j++) {
             
-            float new_val = tanh_prod / tanhf(rel_Lq[j]/2);
+            //float new_val = tanh_prod / tanhf(rel_Lq[j]/2);
+            //above divide tanhf(rel_Lq[j]/2) may cause issue if it is close to 0
+            float new_val = 1.0f;
+            if(j==0) {
+                for(int m=1; m<degree; m++)
+                    new_val *= tanhf(rel_Lq[m]/2);
+            } else if(j==degree-1) {
+                for(int m=0; m<degree-1; m++)
+                    new_val *= tanhf(rel_Lq[m]/2);
+            } else {
+                for(int m =0; m<j; m++)
+                    new_val *= tanhf(rel_Lq[m]/2);
+                for(int m =j+1; m<degree; m++)
+                    new_val *= tanhf(rel_Lq[m]/2);
+            }
+
             if(new_val >= 1) {
                 //positicve, no need to change sign 
                 sel_lr[j] = 2 * 19.07; //atanh(1) = infinite, set 19.07 as maximum value
+                //printf("new_val %f >=1  ", new_val);
             } else if(new_val <= -1){
                 sel_lr[j] = -2 * 19.07; //atanh(-1) = negative infinite, set - 19.07 as min value
+                //printf("new_val %f <=-1  ", new_val);
             } else {
                 sel_lr[j] = 2 * atanhf(new_val);
             }
         }
     } else if(num_zeros == 1) {
         // only one zero value, all sel_lr except zero_idx are zero
-        memset(sel_lr, 0, degree*sizeof(float));
+        memset(sel_lr, 0.0f, degree*sizeof(float));
 
-        if(tanh_prod >= 1) sel_lr[zero_idx] = 2 * 19.07;
-        else if(tanh_prod <= -1) sel_lr[zero_idx] = -2 * 19.07;
-        else sel_lr[zero_idx] = 2 * atanhf(tanh_prod);
+        if(tanh_prod >= 1) {
+            sel_lr[zero_idx] = 2 * 19.07;
+            //printf("tanh_prod %f >=1  ", tanh_prod);
+        } else if(tanh_prod <= -1) {
+            sel_lr[zero_idx] = -2 * 19.07;
+            //printf("tanh_prod %f <=-1  ", tanh_prod);
+        } else {
+            sel_lr[zero_idx] = 2 * atanhf(tanh_prod);
+        }
     } else {
         //for num of zeros >=2, all sel_lr==0
-        memset(sel_lr, 0, degree*sizeof(float));
+        memset(sel_lr, 0.0f, degree*sizeof(float));
     }
 
 
@@ -98,12 +121,18 @@ int32_t layered_BP_ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *c
 
     //memcpy(LQ, LLr, sizeof(int16_t)*(config->N+2*Zc)); 
     //copy from LLr to LQ, and convert from int16 to float 
-    for(int i=0;i<config->N+2*Zc; i++)
+    //scaling by decoder_cfg->max_llr, scaling value
+    //will greatly affect LDPC performance from almost all error to no error
+    for(int i=0;i<config->N+2*Zc; i++) {
         LQ[i] = (float)LLr[i];
+        LQ[i] = LQ[i] / (float)decoder_cfg->max_llr;
+    }
        
 
     //clean Lr mem
-    memset(Lr, 0, sizeof(float)*non_zero_elements*Zc);
+    //memset(Lr, 0, sizeof(float)*non_zero_elements*Zc);
+    for(int i=0; i< non_zero_elements*Zc; i++)
+        Lr[i] = 0.0f;
     
     /* ldpc main loop */
     for(uint16_t iter=0; iter<decoder_cfg->max_iterations; iter++){
