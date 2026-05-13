@@ -116,6 +116,8 @@ def train_c_table_ldpc_model(
     cpu_threads: Optional[int] = 4,
     save_path: Optional[str] = "trained_c_table_ldpc_decoder.pth",
     lib_path: Optional[str] = None,
+    intermediate_loss_weight: float = 0.0,
+    intermediate_loss_stride: int = 4,
     verbose: bool = True,
 ) -> Tuple[CTableNeuralLayeredMinSumDecoder, Dict[str, torch.Tensor], float]:
     """Train alpha/beta for the table-driven layered min-sum decoder."""
@@ -123,6 +125,10 @@ def train_c_table_ldpc_model(
         raise ValueError("crctype must be 0, 1, 2, or 3")
     if cpu_threads is not None:
         torch.set_num_threads(cpu_threads)
+    if intermediate_loss_weight < 0:
+        raise ValueError("intermediate_loss_weight must be non-negative")
+    if intermediate_loss_stride <= 0:
+        raise ValueError("intermediate_loss_stride must be positive")
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     table_config = load_ldpc_table_config(
@@ -145,7 +151,13 @@ def train_c_table_ldpc_model(
         clip_llr=clip_llr,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    #optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=epochs,
+        eta_min=lr * 0.05,
+    )
     criterion = torch.nn.BCEWithLogitsLoss()
 
     best_loss = float("inf")
@@ -172,10 +184,37 @@ def train_c_table_ldpc_model(
 
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        _, final_llr = model(llr_batch, return_llr=True)
-        loss = criterion(-final_llr[:, : table_config.B], target_batch)
+        if intermediate_loss_weight > 0:
+            _, final_llr, iteration_llrs = model(
+                llr_batch,
+                return_llr=True,
+                return_iteration_llrs=True,
+            )
+        else:
+            _, final_llr = model(llr_batch, return_llr=True)
+            iteration_llrs = []
+
+        final_loss = criterion(-final_llr[:, : table_config.B], target_batch)
+        if intermediate_loss_weight > 0:
+            supervised_llrs = iteration_llrs[intermediate_loss_stride - 1 :: intermediate_loss_stride]
+            if supervised_llrs and supervised_llrs[-1] is final_llr:
+                supervised_llrs = supervised_llrs[:-1]
+            if supervised_llrs:
+                intermediate_loss = torch.stack(
+                    [
+                        criterion(-iter_llr[:, : table_config.B], target_batch)
+                        for iter_llr in supervised_llrs
+                    ]
+                ).mean()
+            else:
+                intermediate_loss = final_loss.new_zeros(())
+            loss = final_loss + intermediate_loss_weight * intermediate_loss
+        else:
+            intermediate_loss = final_loss.new_zeros(())
+            loss = final_loss
         loss.backward()
         optimizer.step()
+        scheduler.step()
 
         loss_value = float(loss.item())
         if loss_value < best_loss:
@@ -188,9 +227,15 @@ def train_c_table_ldpc_model(
         if verbose and (epoch == 0 or (epoch + 1) % 5 == 0 or epoch + 1 == epochs):
             alpha_mean = float(model.alpha().detach().mean().cpu())
             beta_mean = float(model.beta().detach().mean().cpu())
+            current_lr = optimizer.param_groups[0]["lr"]
             print(
                 f"epoch {epoch + 1}/{epochs} "
-                f"loss={loss_value:.6f} alpha_mean={alpha_mean:.4f} beta_mean={beta_mean:.4f}"
+                f"loss={loss_value:.6f} "
+                f"final_loss={float(final_loss.item()):.6f} "
+                f"intermediate_loss={float(intermediate_loss.item()):.6f} "
+                f"alpha_mean={alpha_mean:.4f} "
+                f"beta_mean={beta_mean:.4f} "
+                f"lr={current_lr:.3e}"
             )
 
     model.load_state_dict(best_state)
@@ -288,8 +333,10 @@ if __name__ == "__main__":
         num_iterations=32,
         epochs=100,
         batch_size=4,
-        lr=1e-2,
+        lr=2e-3,
         cpu_threads=4,
+        intermediate_loss_weight=0.25,
+        intermediate_loss_stride=4,
         save_path="trained_c_table_ldpc_decoder_bg1.pth",
     )
     print("best loss", trained_loss)

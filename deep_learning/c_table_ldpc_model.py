@@ -236,7 +236,12 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
     def beta(self) -> torch.Tensor:
         return torch.sigmoid(self.raw_beta).clamp(min=0.0, max=1.0 - 1e-6)
 
-    def forward(self, llr: torch.Tensor, return_llr: bool = False):
+    def forward(
+        self,
+        llr: torch.Tensor,
+        return_llr: bool = False,
+        return_iteration_llrs: bool = False,
+    ):
         single = False
         if llr.dim() == 1:
             llr = llr.unsqueeze(0)
@@ -257,6 +262,7 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         ]
         alphas = self.alpha()
         betas = self.beta()
+        iteration_llrs = [] if return_iteration_llrs else None
 
         for iteration in range(self.num_iterations):
             for row in range(self.num_rows):
@@ -287,14 +293,22 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
                 next_LQ[:, flat_cols] = new_lq_values.reshape(batch_size, -1)
                 LQ = next_LQ
                 Lr_rows[row] = new_lr
+            if iteration_llrs is not None:
+                iteration_llrs.append(LQ)
 
         final_llr = LQ
         bits = (final_llr < 0).to(torch.int64)
         if single:
             bits = bits.squeeze(0)
             final_llr = final_llr.squeeze(0)
+            if iteration_llrs is not None:
+                iteration_llrs = [iter_llr.squeeze(0) for iter_llr in iteration_llrs]
+        if return_llr and return_iteration_llrs:
+            return bits, final_llr, iteration_llrs
         if return_llr:
             return bits, final_llr
+        if return_iteration_llrs:
+            return bits, iteration_llrs
         return bits
 
     def trainable_parameters(self):
