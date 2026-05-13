@@ -29,6 +29,9 @@ int32_t c_ldpc_5g_decode(int16_t *LLr, uint8_t *hardbits, ldpc_in_config_t *inco
     } else if (decoder_config->algo == 1) {
         //min-sum algorithm
          return layered_minsum_ldpc_decode(HARQ_memory, hardbits, &ldpc_config, decoder_config);
+    } else if (decoder_config->algo == 2) {
+        //neural min-sum algorithm with trained BG1/BG2 alpha and beta tables
+        return layered_neural_minsum_ldpc_decode(HARQ_memory, hardbits, &ldpc_config, decoder_config);
     } else {
         printf("Invalid decoding algorithm selection!\n");
         return -3;    }

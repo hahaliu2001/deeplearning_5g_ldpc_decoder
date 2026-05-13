@@ -143,11 +143,12 @@ def train_neural_min_sum_decoder( B,E, Qm, noise_power_db, rv, crcpoly, bgn,
 if __name__ == "__main__":
     # quick demo: instantiate, train, and save best state
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.set_num_threads(8)
 
     B,E, Qm, noise_power_db, rv, crcpoly, bgn = 256,256*4,1,6,0,'24A',2
 
     model, state, loss = train_neural_min_sum_decoder(B,E, Qm, noise_power_db, rv, crcpoly, bgn,
-            NeuralLayeredFloatpointMinSumDecoder, epochs=200, batch_size=64, lr=1e-2, device=device)
+            NeuralLayeredFloatpointMinSumDecoder, num_iterations=16,epochs=200, batch_size=4, lr=1e-2, device=device)
     #if state is not None:
     # torch.save(state, "trained_ldpc_decoder.pth")
     print("best loss", loss)
