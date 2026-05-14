@@ -332,7 +332,7 @@ if __name__ == "__main__":
         noise_power_db=5.5,
         num_iterations=32,
         epochs=100,
-        batch_size=4,
+        batch_size=20,
         lr=2e-3,
         cpu_threads=4,
         intermediate_loss_weight=0.25,
