@@ -141,10 +141,10 @@ decoder_name_list = [
 assert len(decoder_name_list) == len(decoder_config_list)
 trained_decoder_idx = decoder_name_list.index("trained-table neural min-sum")
 
-snr_power_db_list = np.arange(-6,-4.5,0.5)
+snr_power_db_list = np.arange(-6,-4,0.5)
 #snr_power_db_list = np.arange(0,2,0.5)
 
-testnum = 2000
+testnum = 200
 
 
 result_file_name = "out/c_neural_ldpc_decoder_result"

@@ -20,11 +20,6 @@ for path in (SCRIPT_DIR, REPO_ROOT):
         sys.path.append(path)
 
 from c_table_ldpc_model import CTableNeuralLayeredMinSumDecoder, load_ldpc_table_config
-from py_src.ldpc_5g_encoder import cb_ldpc_5g_encode
-from py_src.ldpc_utils import tx_rx_process
-from py5gphy.crc import crc
-from py5gphy.ldpc import nr_ldpc_raterecover
-
 
 CRC_TYPE_TO_POLY = {
     0: "16",
@@ -48,8 +43,7 @@ def make_c_table_training_batch(
         target_batch: shape ``[batch_size, model.config.B]``
     """
     cfg = model.config
-    crcpoly = CRC_TYPE_TO_POLY[cfg.crctype]
-
+    
     llrs = []
     targets = []
     for _ in range(batch_size):
@@ -60,8 +54,7 @@ def make_c_table_training_batch(
         cb = np.zeros(K,'i1')
         cb[0:B] = info_bits
         dn = nr_ldpc_encode.encode_ldpc(cb, bgn)
-        dn[dn==-1] = 0
-        
+                
         # combine cb[0:2*Zc] and dn 
         codeword = np.concatenate((cb[0:2*Zc], dn))
         power_noise = 10 ** (noise_power_db / 10)
@@ -77,7 +70,7 @@ def make_c_table_training_batch(
             raise RuntimeError(f"expected LLR length {model.n}, got {decoder_llr.size}")
 
         llrs.append(torch.from_numpy(decoder_llr))
-        targets.append(torch.from_numpy(codeword))
+        targets.append(torch.from_numpy(codeword.astype(np.float32)))
 
     llr_batch = torch.stack(llrs, dim=0).to(device)
     target_batch = torch.stack(targets, dim=0).to(device)
@@ -282,7 +275,7 @@ def evaluate_c_table_ldpc_model(
                 noise_power_db=noise_power_db,
                 device=device,
             )
-            decoded_bits = model(llr_batch)[:, : cfg.B]
+            decoded_bits = model(llr_batch)
             target_bits = target_batch.to(torch.int64)
             errors = decoded_bits.ne(target_bits)
 
@@ -314,6 +307,7 @@ def evaluate_c_table_ldpc_model(
 
 
 if __name__ == "__main__":
+    noise_power_db = 2
     trained_model, trained_state, trained_loss = train_c_table_ldpc_model(
         bgn=1,
         A=232 + 256,
@@ -321,13 +315,13 @@ if __name__ == "__main__":
         E=256 * 4 * 2,
         rv=0,
         Qm=1,
-        noise_power_db=5.5,
-        num_iterations=32,
-        epochs=100,
-        batch_size=20,
+        noise_power_db=noise_power_db,
+        num_iterations=16,
+        epochs=20,
+        batch_size=2,
         lr=2e-3,
         cpu_threads=4,
-        intermediate_loss_weight=0.25,
+        intermediate_loss_weight=0,
         intermediate_loss_stride=4,
         save_path="trained_c_table_ldpc_decoder_bg1.pth",
     )
@@ -340,8 +334,8 @@ if __name__ == "__main__":
 
     test_results = evaluate_c_table_ldpc_model(
         trained_model,
-        noise_power_db=5.5,
-        num_test_blocks=400,
-        batch_size=4,
+        noise_power_db=noise_power_db,
+        num_test_blocks=100,
+        batch_size=2,
     )
     print(test_results)

@@ -79,9 +79,9 @@ def make_c_table_training_batch(
         ).astype(np.float32)
 
         scale = np.max(np.abs(decoder_llr))
-        if scale > 0:
-            decoder_llr = decoder_llr / scale * 128.0
-            decoder_llr = np.clip(decoder_llr, -32768, 32767).astype(np.float32)
+        #if scale > 0:
+        #    decoder_llr = decoder_llr / scale * 128.0
+        #    decoder_llr = np.clip(decoder_llr, -32768, 32767).astype(np.float32)
 
         if decoder_llr.size != model.n:
             raise RuntimeError(f"expected LLR length {model.n}, got {decoder_llr.size}")

@@ -252,7 +252,7 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
             raise ValueError(f"expected llr length {self.n}, got {llr.shape[1]}")
 
         batch_size = llr.shape[0]
-        LQ = llr
+        LQ = llr.clone()
         if self.clip_llr is not None:
             LQ = LQ.clamp(-self.clip_llr, self.clip_llr)
 
@@ -294,7 +294,7 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
                 LQ = next_LQ
                 Lr_rows[row] = new_lr
             if iteration_llrs is not None:
-                iteration_llrs.append(LQ)
+                iteration_llrs.append(LQ.clone())
 
         final_llr = LQ
         bits = (final_llr < 0).to(torch.int64)

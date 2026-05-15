@@ -340,7 +340,7 @@ a nn.Parameter so it will appear in model.parameters() and receive
 
 		if return_llr:
 			return bits, final_llr
-		return bits
+		return bits,final_llr
 
 	def syndrome(self, bits: torch.Tensor) -> torch.Tensor:
 		"""Compute the binary syndrome: H * bits^T (mod 2).
