@@ -11,6 +11,7 @@ SRCS = nr_crc.c \
 	   ldpc_internal.c \
 	   ldpc_rate_recovery.c \
 	   fixedpoint_ldpc_decoder.c \
+	   degree_fixedpoint_ldpc_decoder.c \
 	   BG1_trained_ldpc_weights.c \
 	   BG2_trained_ldpc_weights.c \
 	   neural_fixedpoint_ldpc_decoder.c \

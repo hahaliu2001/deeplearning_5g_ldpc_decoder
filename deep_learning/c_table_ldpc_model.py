@@ -14,7 +14,7 @@ from __future__ import annotations
 import ctypes
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -164,6 +164,19 @@ def _inverse_sigmoid(value: float) -> torch.Tensor:
     return torch.log(v / (1.0 - v))
 
 
+def _inverse_bounded_sigmoid(value: float, min_value: float, max_value: float) -> torch.Tensor:
+    normalized = (float(value) - min_value) / (max_value - min_value)
+    return _inverse_sigmoid(normalized)
+
+
+def _degree_alpha_bucket(degree: int) -> int:
+    if degree <= 4:
+        return 0
+    if degree <= 8:
+        return 1
+    return 2
+
+
 class CTableNeuralLayeredMinSumDecoder(nn.Module):
     """Memory-conscious neural layered min-sum decoder.
 
@@ -174,6 +187,13 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         learnable_beta: train offset beta per iteration/HBG row.
         init_alpha: initial alpha after sigmoid mapping.
         init_beta: initial beta after sigmoid mapping.
+        alpha_mode: ``"row"`` trains one alpha per iteration/HBG row.
+            ``"degree"`` trains one alpha per iteration/degree bucket:
+            degree <= 4, 5 <= degree <= 8, and degree > 8.
+        alpha_min: minimum normalized min-sum alpha after sigmoid mapping.
+        alpha_max: maximum normalized min-sum alpha after sigmoid mapping.
+        init_alpha_degree_values: optional three alpha initial values for
+            ``alpha_mode="degree"``.
         clip_llr: optional LLR clipping value. ``None`` disables clipping.
 
     Input LLR shape is ``[batch, N + 2*Zc]`` or ``[N + 2*Zc]``, matching the
@@ -188,19 +208,57 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         learnable_beta: bool = True,
         init_alpha: float = 0.75,
         init_beta: float = 0.0,
+        alpha_mode: str = "row",
+        alpha_min: float = 0.5,
+        alpha_max: float = 1.0,
+        init_alpha_degree_values: Optional[Sequence[float]] = None,
         clip_llr: Optional[float] = None,
     ) -> None:
         super().__init__()
+        if alpha_mode not in {"row", "degree"}:
+            raise ValueError("alpha_mode must be 'row' or 'degree'")
+        if not 0.0 <= alpha_min < alpha_max <= 1.0:
+            raise ValueError("alpha_min and alpha_max must satisfy 0 <= alpha_min < alpha_max <= 1")
+        if init_alpha_degree_values is not None and len(init_alpha_degree_values) != 3:
+            raise ValueError("init_alpha_degree_values must contain three values")
+
         self.config = table_config
         self.num_iterations = int(num_iterations)
         self.clip_llr = clip_llr
+        self.alpha_mode = alpha_mode
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
         self.n = table_config.N + 2 * table_config.Zc
         self.B = table_config.B
         self.num_rows = table_config.num_rows
         self.num_edges = table_config.num_edges
         self.Zc = table_config.Zc
 
-        raw_alpha = _inverse_sigmoid(init_alpha).repeat(self.num_iterations, self.num_rows)
+        row_degrees = [
+            table_config.row_offsets[row + 1] - table_config.row_offsets[row]
+            for row in range(self.num_rows)
+        ]
+        degree_buckets = torch.tensor(
+            [_degree_alpha_bucket(degree) for degree in row_degrees],
+            dtype=torch.long,
+        )
+        self.register_buffer("row_alpha_buckets", degree_buckets)
+
+        if alpha_mode == "degree":
+            degree_init_values = init_alpha_degree_values or (init_alpha, init_alpha, init_alpha)
+            raw_alpha_init = torch.stack(
+                [
+                    _inverse_bounded_sigmoid(value, self.alpha_min, self.alpha_max)
+                    for value in degree_init_values
+                ]
+            )
+            raw_alpha = raw_alpha_init.unsqueeze(0).repeat(self.num_iterations, 1)
+        else:
+            raw_alpha = _inverse_bounded_sigmoid(
+                init_alpha,
+                self.alpha_min,
+                self.alpha_max,
+            ).repeat(self.num_iterations, self.num_rows)
         raw_beta = _inverse_sigmoid(init_beta).repeat(self.num_iterations, self.num_rows)
         if learnable_scaling:
             self.raw_alpha = nn.Parameter(raw_alpha)
@@ -219,7 +277,7 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         for row in range(self.num_rows):
             start = table_config.row_offsets[row]
             stop = table_config.row_offsets[row + 1]
-            degree = stop - start
+            degree = row_degrees[row]
             hbg_cols = torch.tensor(table_config.hbg_columns[start:stop], dtype=torch.long)
             shifts = torch.tensor(table_config.vij[start:stop], dtype=torch.long)
             lifted_cols = hbg_cols.unsqueeze(0) * self.Zc + ((shifts.unsqueeze(0) + zx) % self.Zc)
@@ -231,7 +289,11 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
             self._row_flat_columns.append(getattr(self, f"row_{row}_flat_columns"))
 
     def alpha(self) -> torch.Tensor:
-        return torch.sigmoid(self.raw_alpha).clamp(min=1e-6, max=1.0)
+        alpha = self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(self.raw_alpha)
+        alpha = alpha.clamp(min=self.alpha_min, max=self.alpha_max)
+        if self.alpha_mode == "degree":
+            return alpha.index_select(1, self.row_alpha_buckets.to(device=alpha.device))
+        return alpha
 
     def beta(self) -> torch.Tensor:
         return torch.sigmoid(self.raw_beta).clamp(min=0.0, max=1.0 - 1e-6)

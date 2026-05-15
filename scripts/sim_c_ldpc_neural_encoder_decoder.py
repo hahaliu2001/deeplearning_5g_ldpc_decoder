@@ -125,26 +125,34 @@ decoder_config_list = [
     #0.7*32767=22936
     [1,    32,  22936,  0,  1280, 32767, -32768],
 
-    #0.67*32767=21954
-    [1,    32,  21954,  0,  1280, 32767, -32768],
+    #0.75*32767=24575
+    [1,    32,  24575,  0,  1280, 32767, -32768],
     
     #alpha/beta fields are ignored by algo 2; it uses BG1/BG2_trained_*_list.
     [2,    32,  0,  0,  1280, 32767, -32768],
+
+    [3,    32,  0,  0,  1280, 32767, -32768],
 
 ]
 decoder_name_list = [
     "layered-BP",
     "single-alpha min-sum alpha=0.70 beta=0",
-    "single-alpha min-sum alpha=0.67 beta=0",
+    "single-alpha min-sum alpha=0.75 beta=0",
     "trained-table neural min-sum",
+    "degree alpha min-sum",
 ]
 assert len(decoder_name_list) == len(decoder_config_list)
 trained_decoder_idx = decoder_name_list.index("trained-table neural min-sum")
+comparison_decoder_names = {
+    "single-alpha min-sum alpha=0.70 beta=0",
+    "single-alpha min-sum alpha=0.75 beta=0",
+    "degree alpha min-sum",
+}
 
 snr_power_db_list = np.arange(-6,-4,0.5)
 #snr_power_db_list = np.arange(0,2,0.5)
 
-testnum = 200
+testnum = 1000
 
 
 result_file_name = "out/c_neural_ldpc_decoder_result"
@@ -183,22 +191,12 @@ for tstconfig in all_configs:
             error_count += decode_status
             
         bler = error_count/testnum
-        result_text = ", ".join(
-            f"{name}: {value:.4f}" for name, value in zip(decoder_name_list, bler)
-        )
         print(
             f"Qm {Qm}, rv {rv}, B {B}, coderate {coderate_map[coderate]}, "
-            f"bgn {bgn}, crc {crctype}, snr_power_db {snr_power_db}: {result_text}"
+            f"bgn {bgn}, crc {crctype}, snr_power_db {snr_power_db}"
         )
-        for idx, name in enumerate(decoder_name_list):
-            if idx == trained_decoder_idx or "single-alpha" not in name:
-                continue
-            improvement = bler[idx] - bler[trained_decoder_idx]
-            print(
-                f"  trained-table benefit vs {name}: "
-                f"{improvement:+.4f} BLER,bler[idx]={bler[idx]},bler[trained_decoder_idx]={bler[trained_decoder_idx]}"
-            )
-
+        for name, value in zip(decoder_name_list, bler):
+            print(f"  {name}: BLER={value:.4f}")
         bler_list.append(bler)
     
     test_result.append([tstconfig, bler_list])

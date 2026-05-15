@@ -169,4 +169,3 @@ int32_t layered_minsum_ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_
     }
     return 1; // Failed to converge within max_iter
 }
-

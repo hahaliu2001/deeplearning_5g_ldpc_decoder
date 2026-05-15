@@ -34,6 +34,16 @@ CRC_TYPE_TO_POLY = {
 }
 
 
+def _infer_model_device(model: torch.nn.Module) -> torch.device:
+    first_param = next(model.parameters(), None)
+    if first_param is not None:
+        return first_param.device
+    first_buffer = next(model.buffers(), None)
+    if first_buffer is not None:
+        return first_buffer.device
+    return torch.device("cpu")
+
+
 def make_c_table_training_batch(
     model: CTableNeuralLayeredMinSumDecoder,
     batch_size: int,
@@ -111,7 +121,14 @@ def train_c_table_ldpc_model(
     init_beta: float = 0.0,
     learnable_scaling: bool = True,
     learnable_beta: bool = False,
+    alpha_mode: str = "row",
+    alpha_min: float = 0.5,
+    alpha_max: float = 1.0,
+    init_alpha_degree_values: Optional[Tuple[float, float, float]] = None,
     clip_llr: Optional[float] = None,
+    training_noise_power_db_range: Optional[Tuple[float, float]] = None,
+    loss_type: str = "bce",
+    llr_margin: float = 5.0,
     device: Optional[torch.device] = None,
     cpu_threads: Optional[int] = 4,
     save_path: Optional[str] = "trained_c_table_ldpc_decoder.pth",
@@ -129,6 +146,16 @@ def train_c_table_ldpc_model(
         raise ValueError("intermediate_loss_weight must be non-negative")
     if intermediate_loss_stride <= 0:
         raise ValueError("intermediate_loss_stride must be positive")
+    if loss_type not in {"bce", "margin"}:
+        raise ValueError("loss_type must be 'bce' or 'margin'")
+    if alpha_mode not in {"row", "degree"}:
+        raise ValueError("alpha_mode must be 'row' or 'degree'")
+    if llr_margin <= 0:
+        raise ValueError("llr_margin must be positive")
+    if training_noise_power_db_range is not None:
+        low, high = training_noise_power_db_range
+        if low > high:
+            raise ValueError("training_noise_power_db_range must be in (low, high) order")
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     table_config = load_ldpc_table_config(
@@ -148,17 +175,28 @@ def train_c_table_ldpc_model(
         learnable_beta=learnable_beta,
         init_alpha=init_alpha,
         init_beta=init_beta,
+        alpha_mode=alpha_mode,
+        alpha_min=alpha_min,
+        alpha_max=alpha_max,
+        init_alpha_degree_values=init_alpha_degree_values,
         clip_llr=clip_llr,
     ).to(device)
 
-    #optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=epochs,
         eta_min=lr * 0.05,
     )
     criterion = torch.nn.BCEWithLogitsLoss()
+
+    def decoder_loss(llr: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        logits = -llr[:, : table_config.B]
+        if loss_type == "bce":
+            return criterion(logits, target)
+
+        signed_llr = (1.0 - 2.0 * target) * llr[:, : table_config.B]
+        return torch.nn.functional.softplus(llr_margin - signed_llr).mean()
 
     best_loss = float("inf")
     best_state: Dict[str, torch.Tensor] = {
@@ -171,14 +209,20 @@ def train_c_table_ldpc_model(
             "training C-table LDPC model: "
             f"bgn={bgn} A={A} B={table_config.B} Zc={table_config.Zc} "
             f"n={model.n} rows={model.num_rows} edges={model.num_edges} "
+            f"alpha_mode={alpha_mode} "
             f"message_memory={memory['total_message_MB']:.2f} MB"
         )
 
     for epoch in range(epochs):
+        batch_noise_power_db = noise_power_db
+        if training_noise_power_db_range is not None:
+            low, high = training_noise_power_db_range
+            batch_noise_power_db = float(np.random.uniform(low, high))
+
         llr_batch, target_batch = make_c_table_training_batch(
             model=model,
             batch_size=batch_size,
-            noise_power_db=noise_power_db,
+            noise_power_db=batch_noise_power_db,
             device=device,
         )
 
@@ -194,7 +238,7 @@ def train_c_table_ldpc_model(
             _, final_llr = model(llr_batch, return_llr=True)
             iteration_llrs = []
 
-        final_loss = criterion(-final_llr[:, : table_config.B], target_batch)
+        final_loss = decoder_loss(final_llr, target_batch)
         if intermediate_loss_weight > 0:
             supervised_llrs = iteration_llrs[intermediate_loss_stride - 1 :: intermediate_loss_stride]
             if supervised_llrs and supervised_llrs[-1] is final_llr:
@@ -202,7 +246,7 @@ def train_c_table_ldpc_model(
             if supervised_llrs:
                 intermediate_loss = torch.stack(
                     [
-                        criterion(-iter_llr[:, : table_config.B], target_batch)
+                        decoder_loss(iter_llr, target_batch)
                         for iter_llr in supervised_llrs
                     ]
                 ).mean()
@@ -235,6 +279,7 @@ def train_c_table_ldpc_model(
                 f"intermediate_loss={float(intermediate_loss.item()):.6f} "
                 f"alpha_mean={alpha_mean:.4f} "
                 f"beta_mean={beta_mean:.4f} "
+                f"noise_power_db={batch_noise_power_db:.2f} "
                 f"lr={current_lr:.3e}"
             )
 
@@ -271,7 +316,7 @@ def evaluate_c_table_ldpc_model(
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
 
-    device = device or next(model.parameters()).device
+    device = device or _infer_model_device(model)
     model.to(device)
     model.eval()
 
@@ -321,6 +366,89 @@ def evaluate_c_table_ldpc_model(
     return results
 
 
+def evaluate_c_table_ldpc_models_paired(
+    models: Dict[str, CTableNeuralLayeredMinSumDecoder],
+    noise_power_db: float,
+    num_test_blocks: int = 100,
+    batch_size: int = 8,
+    device: Optional[torch.device] = None,
+    verbose: bool = True,
+) -> Dict[str, Dict[str, float]]:
+    """Evaluate multiple decoders on identical generated LDPC test blocks."""
+    if not models:
+        raise ValueError("models must not be empty")
+    if num_test_blocks <= 0:
+        raise ValueError("num_test_blocks must be positive")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    first_model = next(iter(models.values()))
+    device = device or _infer_model_device(first_model)
+    cfg = first_model.config
+    for model in models.values():
+        if model.config != cfg:
+            raise ValueError("all models must use the same LDPC table config")
+        model.to(device)
+        model.eval()
+
+    totals = {
+        name: {
+            "total_bits": 0,
+            "bit_errors": 0,
+            "block_errors": 0,
+            "tested_blocks": 0,
+        }
+        for name in models
+    }
+
+    with torch.no_grad():
+        tested_blocks = 0
+        while tested_blocks < num_test_blocks:
+            current_batch_size = min(batch_size, num_test_blocks - tested_blocks)
+            llr_batch, target_batch = make_c_table_training_batch(
+                model=first_model,
+                batch_size=current_batch_size,
+                noise_power_db=noise_power_db,
+                device=device,
+            )
+            target_bits = target_batch.to(torch.int64)
+
+            for name, model in models.items():
+                decoded_bits = model(llr_batch)[:, : cfg.B]
+                errors = decoded_bits.ne(target_bits)
+                totals[name]["bit_errors"] += int(errors.sum().item())
+                totals[name]["block_errors"] += int(errors.any(dim=1).sum().item())
+                totals[name]["total_bits"] += int(target_bits.numel())
+                totals[name]["tested_blocks"] += current_batch_size
+
+            tested_blocks += current_batch_size
+
+    results: Dict[str, Dict[str, float]] = {}
+    for name, total in totals.items():
+        total_bits = total["total_bits"]
+        tested = total["tested_blocks"]
+        ber = total["bit_errors"] / total_bits if total_bits else 0.0
+        bler = total["block_errors"] / tested if tested else 0.0
+        results[name] = {
+            "num_test_blocks": float(tested),
+            "total_bits": float(total_bits),
+            "bit_errors": float(total["bit_errors"]),
+            "block_errors": float(total["block_errors"]),
+            "BER": ber,
+            "BLER": bler,
+        }
+
+        if verbose:
+            print(
+                f"{name} paired test result: "
+                f"blocks={tested} bit_errors={total['bit_errors']}/{total_bits} "
+                f"block_errors={total['block_errors']}/{tested} "
+                f"BER={ber:.6e} BLER={bler:.6e}"
+            )
+
+    return results
+
+
 if __name__ == "__main__":
     trained_model, trained_state, trained_loss = train_c_table_ldpc_model(
         bgn=1,
@@ -329,11 +457,22 @@ if __name__ == "__main__":
         E=256 * 4 * 2,
         rv=0,
         Qm=1,
-        noise_power_db=5.5,
+        noise_power_db=5,
         num_iterations=32,
         epochs=100,
         batch_size=20,
-        lr=2e-3,
+        lr=1e-3,
+        init_alpha=0.7,
+        init_beta=0.0,
+        learnable_scaling=True,
+        learnable_beta=False,
+        alpha_mode="degree",
+        alpha_min=0.5,
+        alpha_max=1.0,
+        init_alpha_degree_values=(0.8125, 0.75, 0.6875),
+        training_noise_power_db_range=(4.0, 6.0),
+        loss_type="bce",
+        llr_margin=5.0,
         cpu_threads=4,
         intermediate_loss_weight=0.25,
         intermediate_loss_stride=4,
@@ -344,12 +483,49 @@ if __name__ == "__main__":
     alpha = trained_model.alpha().detach().cpu().numpy()
     beta = trained_model.beta().detach().cpu().numpy()
     print("alpha shape", alpha.shape)
-    print("beta shape", beta.shape)
-
-    test_results = evaluate_c_table_ldpc_model(
-        trained_model,
-        noise_power_db=5.5,
-        num_test_blocks=400,
-        batch_size=4,
+    print(
+        "alpha stats",
+        {
+            "min": float(alpha.min()),
+            "max": float(alpha.max()),
+            "mean": float(alpha.mean()),
+            "std": float(alpha.std()),
+        },
     )
+    print("beta shape", beta.shape)
+    print(
+        "beta stats",
+        {
+            "min": float(beta.min()),
+            "max": float(beta.max()),
+            "mean": float(beta.mean()),
+            "std": float(beta.std()),
+        },
+    )
+
+    fixed_model = CTableNeuralLayeredMinSumDecoder(
+        trained_model.config,
+        num_iterations=trained_model.num_iterations,
+        learnable_scaling=False,
+        learnable_beta=False,
+        init_alpha=0.7,
+        init_beta=0.0,
+        alpha_mode=trained_model.alpha_mode,
+        alpha_min=trained_model.alpha_min,
+        alpha_max=trained_model.alpha_max,
+        init_alpha_degree_values=(0.8125, 0.75, 0.6875),
+    ).to(_infer_model_device(trained_model))
+
+    test_results = {}
+    for eval_noise_power_db in (4.5, 5.0, 5.5):
+        print(f"paired evaluation noise_power_db={eval_noise_power_db:.1f}")
+        test_results[eval_noise_power_db] = evaluate_c_table_ldpc_models_paired(
+            {
+                "fixed_init_alpha": fixed_model,
+                "trained_alpha": trained_model,
+            },
+            noise_power_db=eval_noise_power_db,
+            num_test_blocks=400,
+            batch_size=4,
+        )
     print(test_results)

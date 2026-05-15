@@ -103,46 +103,56 @@ def run_ldpc_test(ldpc_in_config, decoder_config_list, noise_power_db):
 
 #test parameters
 #QmList = [1,2,4,6,8]
-QmList = [1,2]
+QmList = [1]
 #rvList = [0,1,2,3]
 rvList = [0]
-B_list = [256, 512, 1024, 2048, 3840, 5120]
-#B_list = [640,1280]
-coderate_list = [8/9, 4/5, 2/3, 1/3, 1/5]
-coderate_map = {8/9:'8/9', 4/5:'4/5', 2/3:'2/3', 1/3:'1/3', 1/5:'1/5'}
+#B_list = [256, 512, 1024, 2048, 3840, 5120]
+B_list = [512]
+#coderate_list = [8/9, 4/5, 2/3, 1/3, 1/5]
+coderate_list = [1/4]
+coderate_map = {8/9:'8/9', 4/5:'4/5', 2/3:'2/3', 1/3:'1/3', 1/4:'1/4',1/5:'1/5'}
 #coderate_list = [1/5]
-bgn_list = [1,2]
+bgn_list = [1]
 #crctype_list = [0,1,2,3]
 crctype_list = [1]
 all_configs = list(itertools.product(QmList, rvList, B_list, coderate_list, bgn_list, crctype_list))
 
-decoder_config_list = [
-    #algo 0 for layered-BP, 1 for layered-min-sum
-    #algo, max_iterations,alpha, beta, filling_bit_value,max_llr,min_llr
-    [0,    8,  1,  0,  1280, 20, -32768],
-    [0,    16,  1,  0,  1280, 20, -32768],
-    [0,    24,  1,  0,  1280, 20, -32768],
-    [0,    32,  1,  0,  1280, 10, -32768],
-    [0,    32,  1,  0,  1280, 20, -32768],
-    [0,    32,  1,  0,  640, 20, -32768],
-    [0,    32,  1,  0,  2560, 20, -32768],
+if 0:
+    decoder_config_list = [
+        #algo 0 for layered-BP, 1 for layered-min-sum
+        #algo, max_iterations,alpha, beta, filling_bit_value,max_llr,min_llr
+        [0,    8,  1,  0,  1280, 20, -32768],
+        [0,    16,  1,  0,  1280, 20, -32768],
+        [0,    24,  1,  0,  1280, 20, -32768],
+        [0,    32,  1,  0,  1280, 10, -32768],
+        [0,    32,  1,  0,  1280, 20, -32768],
+        [0,    32,  1,  0,  640, 20, -32768],
+        [0,    32,  1,  0,  2560, 20, -32768],
 
-    [1,    32,  32767,  0,  1280, 32767, -32768],
+        [1,    32,  32767,  0,  1280, 32767, -32768],
     
-    #0.7*32767=22936
-    [1,    32,  22936,  0,  1280, 32767, -32768],
-    [1,    32,  22936,  1,  1280, 32767, -32768],
-    [1,    32,  22936,  2,  1280, 32767, -32768],
-    [1,    32,  22936,  3,  1280, 32767, -32768],
-    #0.73*32767= 23920
-    [1,    32,  23920,  0,  1280, 32767, -32768],
-    #0.67*32767= 21954
-    [1,    32,  21954,  0,  1280, 32767, -32768],
+        #0.7*32767=22936
+        [1,    32,  22936,  0,  1280, 32767, -32768],
+        [1,    32,  22936,  1,  1280, 32767, -32768],
+        [1,    32,  22936,  2,  1280, 32767, -32768],
+        [1,    32,  22936,  3,  1280, 32767, -32768],
+        #0.73*32767= 23920
+        [1,    32,  23920,  0,  1280, 32767, -32768],
+        #0.67*32767= 21954
+        [1,    32,  21954,  0,  1280, 32767, -32768],
 
-]
+    ]
+else:
+     decoder_config_list = [
+        #algo 0 for layered-BP, 1 for layered-min-sum
+        #algo, max_iterations,alpha, beta, filling_bit_value,max_llr,min_llr
+        #0.7*32767=22936
+        [1,    32,  22936,  0,  1280, 32767, -32768],
+     ]
+     
 
-snr_power_db_list = np.arange(-9,-3,0.5)
-#snr_power_db_list = np.arange(0,2,0.5)
+#snr_power_db_list = np.arange(-9,-3,0.5)
+snr_power_db_list = np.arange(-6,-2,0.5)
 
 testnum = 200
 

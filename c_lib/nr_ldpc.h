@@ -105,6 +105,7 @@ extern int16_t HARQ_memory[BG1_NUM_COLS*MAX_ZC];
 
 extern int gen_ldpc_parameters(ldpc_config_t *params, ldpc_in_config_t *inconfig );
 extern int32_t layered_minsum_ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg);
+extern int32_t layered_degree_minsum_ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg);
 extern int32_t layered_neural_minsum_ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg);
 extern int32_t layered_BP_ldpc_decode(int16_t *LLr, uint8_t *hardbits, ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg);
 extern void nr_ldpc_rate_recover_harq_combine(ldpc_config_t *config, int16_t filling_bit_value, int16_t *input_LLr);
