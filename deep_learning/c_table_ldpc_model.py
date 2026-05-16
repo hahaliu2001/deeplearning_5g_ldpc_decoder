@@ -14,7 +14,7 @@ from __future__ import annotations
 import ctypes
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -165,8 +165,26 @@ def _inverse_sigmoid(value: float) -> torch.Tensor:
 
 
 def _inverse_bounded_sigmoid(value: float, min_value: float, max_value: float) -> torch.Tensor:
+    if not min_value < float(value) < max_value:
+        raise ValueError(
+            f"bounded sigmoid value must satisfy {min_value} < value < {max_value}; got {value}"
+        )
     normalized = (float(value) - min_value) / (max_value - min_value)
     return _inverse_sigmoid(normalized)
+
+
+def _inverse_bounded_sigmoid_tensor(
+    values: torch.Tensor,
+    min_value: float,
+    max_value: float,
+) -> torch.Tensor:
+    if bool(torch.any(values <= min_value).item()) or bool(torch.any(values >= max_value).item()):
+        raise ValueError(
+            f"bounded sigmoid values must satisfy {min_value} < value < {max_value}"
+        )
+    normalized = (values - min_value) / (max_value - min_value)
+    normalized = normalized.clamp(1e-6, 1.0 - 1e-6)
+    return torch.log(normalized / (1.0 - normalized))
 
 
 def _degree_alpha_bucket(degree: int) -> int:
@@ -185,7 +203,8 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         num_iterations: number of layered decoding iterations.
         learnable_scaling: train normalized min-sum alpha per iteration/HBG row.
         learnable_beta: train offset beta per iteration/HBG row.
-        init_alpha: initial alpha after sigmoid mapping.
+        init_alpha: initial alpha after sigmoid mapping. For ``alpha_mode="row"``,
+            this can be either a scalar or a ``[num_iterations, num_rows]`` table.
         init_beta: initial beta after sigmoid mapping.
         alpha_mode: ``"row"`` trains one alpha per iteration/HBG row.
             ``"degree"`` trains one alpha per iteration/degree bucket:
@@ -206,19 +225,19 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         num_iterations: int = 8,
         learnable_scaling: bool = True,
         learnable_beta: bool = True,
-        init_alpha: float = 0.75,
+        init_alpha: Union[float, Sequence[Sequence[float]], torch.Tensor] = 0.75,
         init_beta: float = 0.0,
         alpha_mode: str = "row",
         alpha_min: float = 0.5,
-        alpha_max: float = 1.0,
+        alpha_max: float = 1.0 - 1e-6,
         init_alpha_degree_values: Optional[Sequence[float]] = None,
         clip_llr: Optional[float] = None,
     ) -> None:
         super().__init__()
         if alpha_mode not in {"row", "degree"}:
             raise ValueError("alpha_mode must be 'row' or 'degree'")
-        if not 0.0 <= alpha_min < alpha_max <= 1.0:
-            raise ValueError("alpha_min and alpha_max must satisfy 0 <= alpha_min < alpha_max <= 1")
+        if not 0.0 < alpha_min < alpha_max < 1.0:
+            raise ValueError("alpha_min and alpha_max must satisfy 0 < alpha_min < alpha_max < 1")
         if init_alpha_degree_values is not None and len(init_alpha_degree_values) != 3:
             raise ValueError("init_alpha_degree_values must contain three values")
 
@@ -245,6 +264,8 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         self.register_buffer("row_alpha_buckets", degree_buckets)
 
         if alpha_mode == "degree":
+            if not isinstance(init_alpha, (int, float)):
+                raise ValueError("init_alpha must be a scalar when alpha_mode='degree'")
             degree_init_values = init_alpha_degree_values or (init_alpha, init_alpha, init_alpha)
             raw_alpha_init = torch.stack(
                 [
@@ -254,11 +275,26 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
             )
             raw_alpha = raw_alpha_init.unsqueeze(0).repeat(self.num_iterations, 1)
         else:
-            raw_alpha = _inverse_bounded_sigmoid(
-                init_alpha,
-                self.alpha_min,
-                self.alpha_max,
-            ).repeat(self.num_iterations, self.num_rows)
+            if isinstance(init_alpha, (int, float)):
+                raw_alpha = _inverse_bounded_sigmoid(
+                    float(init_alpha),
+                    self.alpha_min,
+                    self.alpha_max,
+                ).repeat(self.num_iterations, self.num_rows)
+            else:
+                init_alpha_tensor = torch.as_tensor(init_alpha, dtype=torch.float32)
+                expected_shape = (self.num_iterations, self.num_rows)
+                if tuple(init_alpha_tensor.shape) != expected_shape:
+                    raise ValueError(
+                        "init_alpha must be a scalar or have shape "
+                        f"{expected_shape} when alpha_mode='row'; "
+                        f"got {tuple(init_alpha_tensor.shape)}"
+                    )
+                raw_alpha = _inverse_bounded_sigmoid_tensor(
+                    init_alpha_tensor,
+                    self.alpha_min,
+                    self.alpha_max,
+                )
         raw_beta = _inverse_sigmoid(init_beta).repeat(self.num_iterations, self.num_rows)
         if learnable_scaling:
             self.raw_alpha = nn.Parameter(raw_alpha)

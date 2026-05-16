@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -42,6 +42,47 @@ def _infer_model_device(model: torch.nn.Module) -> torch.device:
     if first_buffer is not None:
         return first_buffer.device
     return torch.device("cpu")
+
+
+def make_degree_seeded_row_alpha_init(table_config, num_iterations: int) -> np.ndarray:
+    """Create a [iterations, HBG_row] alpha table from each HBG row degree."""
+    row_values = []
+    for row in range(table_config.num_rows):
+        degree = table_config.row_offsets[row + 1] - table_config.row_offsets[row]
+        if degree <= 4:
+            #row_values.append(0.8125)
+            row_values.append(0.6)
+        elif degree < 8:
+            #row_values.append(0.75)
+            row_values.append(0.6)
+        else:
+            #row_values.append(0.6875)
+            row_values.append(0.6)
+
+    return np.tile(np.asarray(row_values, dtype=np.float32), (num_iterations, 1))
+
+
+def load_trained_row_alpha_init(
+    checkpoint_path: str,
+    alpha_min: float,
+    alpha_max: float,
+    expected_shape: Tuple[int, int],
+) -> np.ndarray:
+    """Load a trained raw_alpha checkpoint and return the bounded alpha table."""
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    if "raw_alpha" not in state_dict:
+        raise KeyError(f"{checkpoint_path} does not contain state_dict['raw_alpha']")
+
+    raw_alpha = state_dict["raw_alpha"].detach().cpu()
+    if tuple(raw_alpha.shape) != expected_shape:
+        raise ValueError(
+            f"expected raw_alpha shape {expected_shape} from {checkpoint_path}, "
+            f"got {tuple(raw_alpha.shape)}"
+        )
+
+    alpha = alpha_min + (alpha_max - alpha_min) * torch.sigmoid(raw_alpha)
+    return alpha.numpy().astype(np.float32)
 
 
 def make_c_table_training_batch(
@@ -88,11 +129,6 @@ def make_c_table_training_batch(
             (np.zeros(2 * cfg.Zc, dtype=recovered_llr.dtype), recovered_llr)
         ).astype(np.float32)
 
-        scale = np.max(np.abs(decoder_llr))
-        #if scale > 0:
-        #    decoder_llr = decoder_llr / scale * 128.0
-        #    decoder_llr = np.clip(decoder_llr, -32768, 32767).astype(np.float32)
-
         if decoder_llr.size != model.n:
             raise RuntimeError(f"expected LLR length {model.n}, got {decoder_llr.size}")
 
@@ -117,13 +153,13 @@ def train_c_table_ldpc_model(
     epochs: int = 50,
     batch_size: int = 8,
     lr: float = 1e-2,
-    init_alpha: float = 0.7,
+    init_alpha: Union[float, Sequence[Sequence[float]], torch.Tensor] = 0.7,
     init_beta: float = 0.0,
     learnable_scaling: bool = True,
     learnable_beta: bool = False,
     alpha_mode: str = "row",
     alpha_min: float = 0.5,
-    alpha_max: float = 1.0,
+    alpha_max: float = 1.0 - 1e-6,
     init_alpha_degree_values: Optional[Tuple[float, float, float]] = None,
     clip_llr: Optional[float] = None,
     training_noise_power_db_range: Optional[Tuple[float, float]] = None,
@@ -150,6 +186,8 @@ def train_c_table_ldpc_model(
         raise ValueError("loss_type must be 'bce' or 'margin'")
     if alpha_mode not in {"row", "degree"}:
         raise ValueError("alpha_mode must be 'row' or 'degree'")
+    if not 0.0 < alpha_min < alpha_max < 1.0:
+        raise ValueError("alpha_min and alpha_max must satisfy 0 < alpha_min < alpha_max < 1")
     if llr_margin <= 0:
         raise ValueError("llr_margin must be positive")
     if training_noise_power_db_range is not None:
@@ -238,6 +276,26 @@ def train_c_table_ldpc_model(
             _, final_llr = model(llr_batch, return_llr=True)
             iteration_llrs = []
 
+        if not torch.isfinite(final_llr).all():
+            finite_final_llr = final_llr[torch.isfinite(final_llr)]
+            if finite_final_llr.numel() > 0:
+                min_final_llr = float(finite_final_llr.min().detach().cpu())
+                max_final_llr = float(finite_final_llr.max().detach().cpu())
+            else:
+                min_final_llr = float("nan")
+                max_final_llr = float("nan")
+            alpha_values = model.alpha().detach()
+            raise FloatingPointError(
+                "non-finite final_llr detected before loss; "
+                f"epoch={epoch + 1}, noise_power_db={batch_noise_power_db:.2f}, "
+                f"finite_final_llr_min={min_final_llr:.3e}, "
+                f"finite_final_llr_max={max_final_llr:.3e}, "
+                f"alpha_min={float(alpha_values.min().cpu()):.6f}, "
+                f"alpha_max={float(alpha_values.max().cpu()):.6f}. "
+                "Try lower init_alpha_degree_values/alpha_max, enable clip_llr, "
+                "or reduce lr/num_iterations."
+            )
+
         final_loss = decoder_loss(final_llr, target_batch)
         if intermediate_loss_weight > 0:
             supervised_llrs = iteration_llrs[intermediate_loss_stride - 1 :: intermediate_loss_stride]
@@ -256,7 +314,17 @@ def train_c_table_ldpc_model(
         else:
             intermediate_loss = final_loss.new_zeros(())
             loss = final_loss
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                "non-finite training loss detected; try lower init_alpha/alpha_max, "
+                "enable clip_llr, or reduce lr/num_iterations"
+            )
+        alpha_before_step = model.alpha().detach()
         loss.backward()
+        raw_alpha_grad_norm = 0.0
+        if hasattr(model, "raw_alpha") and model.raw_alpha.grad is not None:
+            raw_alpha_grad_norm = float(model.raw_alpha.grad.detach().norm().cpu())
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler.step()
 
@@ -269,7 +337,11 @@ def train_c_table_ldpc_model(
             }
 
         if verbose and (epoch == 0 or (epoch + 1) % 5 == 0 or epoch + 1 == epochs):
-            alpha_mean = float(model.alpha().detach().mean().cpu())
+            alpha_after_step = model.alpha().detach()
+            alpha_mean = float(alpha_after_step.mean().cpu())
+            alpha_min_value = float(alpha_after_step.min().cpu())
+            alpha_max_value = float(alpha_after_step.max().cpu())
+            alpha_step_max = float((alpha_after_step - alpha_before_step).abs().max().cpu())
             beta_mean = float(model.beta().detach().mean().cpu())
             current_lr = optimizer.param_groups[0]["lr"]
             print(
@@ -278,6 +350,10 @@ def train_c_table_ldpc_model(
                 f"final_loss={float(final_loss.item()):.6f} "
                 f"intermediate_loss={float(intermediate_loss.item()):.6f} "
                 f"alpha_mean={alpha_mean:.4f} "
+                f"alpha_min={alpha_min_value:.6f} "
+                f"alpha_max={alpha_max_value:.6f} "
+                f"alpha_step_max={alpha_step_max:.3e} "
+                f"raw_alpha_grad_norm={raw_alpha_grad_norm:.3e} "
                 f"beta_mean={beta_mean:.4f} "
                 f"noise_power_db={batch_noise_power_db:.2f} "
                 f"lr={current_lr:.3e}"
@@ -450,29 +526,68 @@ def evaluate_c_table_ldpc_models_paired(
 
 
 if __name__ == "__main__":
+    main_bgn = 1
+    main_A = 232 + 256
+    main_crctype = 1
+    main_E = 256 * 4 * 2
+    main_rv = 0
+    main_Qm = 1
+    main_num_iterations = 32
+    main_alpha_min = 0.5
+    main_alpha_max = 1.0 - 1e-6
+    trained_alpha_init_path = "opt1_trained_c_table_ldpc_decoder_bg1.pth"
+    main_table_config = load_ldpc_table_config(
+        bgn=main_bgn,
+        A=main_A,
+        crctype=main_crctype,
+        E=main_E,
+        rv=main_rv,
+        Qm=main_Qm,
+        HARQ_on=0,
+    )
+    row_init_alpha = make_degree_seeded_row_alpha_init(
+        main_table_config,
+        num_iterations=main_num_iterations,
+    )
+    if os.path.exists(trained_alpha_init_path):
+        row_init_alpha = load_trained_row_alpha_init(
+            trained_alpha_init_path,
+            alpha_min=main_alpha_min,
+            alpha_max=main_alpha_max,
+            expected_shape=(main_num_iterations, main_table_config.num_rows),
+        )
+        print(
+            f"loaded init_alpha from {trained_alpha_init_path}: "
+            f"shape={row_init_alpha.shape} "
+            f"min={row_init_alpha.min():.6f} "
+            f"max={row_init_alpha.max():.6f} "
+            f"mean={row_init_alpha.mean():.6f}"
+        )
+
     trained_model, trained_state, trained_loss = train_c_table_ldpc_model(
-        bgn=1,
-        A=232 + 256,
-        crctype=1,
-        E=256 * 4 * 2,
-        rv=0,
-        Qm=1,
+        bgn=main_bgn,
+        A=main_A,
+        crctype=main_crctype,
+        E=main_E,
+        rv=main_rv,
+        Qm=main_Qm,
         noise_power_db=5,
-        num_iterations=32,
+        num_iterations=main_num_iterations,
         epochs=100,
         batch_size=20,
         lr=1e-3,
-        init_alpha=0.7,
+        init_alpha=row_init_alpha,
         init_beta=0.0,
         learnable_scaling=True,
         learnable_beta=False,
-        alpha_mode="degree",
-        alpha_min=0.5,
-        alpha_max=1.0,
-        init_alpha_degree_values=(0.8125, 0.75, 0.6875),
-        training_noise_power_db_range=(4.0, 6.0),
+        alpha_mode="row",
+        alpha_min=main_alpha_min,
+        alpha_max=main_alpha_max,
+        init_alpha_degree_values=None,
+        training_noise_power_db_range=(5.0, 6.0),
         loss_type="bce",
         llr_margin=5.0,
+        clip_llr=None,
         cpu_threads=4,
         intermediate_loss_weight=0.25,
         intermediate_loss_stride=4,
@@ -508,9 +623,9 @@ if __name__ == "__main__":
         num_iterations=trained_model.num_iterations,
         learnable_scaling=False,
         learnable_beta=False,
-        init_alpha=0.7,
+        init_alpha=0.75,
         init_beta=0.0,
-        alpha_mode=trained_model.alpha_mode,
+        alpha_mode="degree",
         alpha_min=trained_model.alpha_min,
         alpha_max=trained_model.alpha_max,
         init_alpha_degree_values=(0.8125, 0.75, 0.6875),
@@ -525,7 +640,14 @@ if __name__ == "__main__":
                 "trained_alpha": trained_model,
             },
             noise_power_db=eval_noise_power_db,
-            num_test_blocks=400,
+            num_test_blocks=800,
             batch_size=4,
         )
     print(test_results)
+
+    raw = trained_model.raw_alpha.detach()
+    trained_alpha = (
+        trained_model.alpha_min
+        + (trained_model.alpha_max - trained_model.alpha_min) * torch.sigmoid(raw)
+    )
+    print(trained_alpha.cpu().numpy())

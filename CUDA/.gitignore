@@ -1,0 +1,4 @@
+*.o
+*.so
+test_ldpc_5g_decoder_cuda
+test_ldpc_5g_encoder_cuda

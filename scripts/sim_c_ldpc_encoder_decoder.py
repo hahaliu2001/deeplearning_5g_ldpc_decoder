@@ -148,13 +148,14 @@ else:
         #algo, max_iterations,alpha, beta, filling_bit_value,max_llr,min_llr
         #0.7*32767=22936
         [1,    32,  22936,  0,  1280, 32767, -32768],
+        [0,    32,  1,  0,  1280, 20, -32768],
      ]
      
 
 #snr_power_db_list = np.arange(-9,-3,0.5)
-snr_power_db_list = np.arange(-6,-2,0.5)
+snr_power_db_list = np.arange(-2,0,0.2)
 
-testnum = 200
+testnum = 40000
 
 
 result_file_name = "out/c_ldpc_decoder_result.pkl"
