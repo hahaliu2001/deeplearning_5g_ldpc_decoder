@@ -25,6 +25,129 @@
         }                                                                    \
     } while (0)
 
+typedef struct {
+    int16_t *LQ;
+    int16_t *Lr;
+    int16_t *input_llr;
+    uint8_t *hardbits;
+    uint16_t *Vij_array;
+    uint16_t *HBG_array;
+    uint16_t *HBG_offset_array;
+    uint32_t lq_capacity;
+    uint32_t lr_capacity;
+    uint32_t input_llr_capacity;
+    uint32_t hardbit_capacity;
+    uint32_t non_zero_capacity;
+    uint32_t row_offsets_capacity;
+    const uint16_t *host_Vij_array;
+    const uint16_t *host_HBG_array;
+    const uint16_t *host_HBG_offset_array;
+    uint16_t cached_bgn;
+    uint16_t cached_Zc;
+    uint16_t cached_iLS;
+} cuda_degree_decoder_workspace_t;
+
+static cuda_degree_decoder_workspace_t g_degree_decoder_workspace;
+
+static int cuda_degree_ensure_workspace(
+    cuda_degree_decoder_workspace_t *ws,
+    uint32_t lq_count,
+    uint32_t lr_count,
+    uint32_t input_llr_count,
+    uint32_t hardbit_bytes,
+    uint32_t non_zero_elements,
+    uint32_t row_offsets)
+{
+    if (ws->lq_capacity < lq_count) {
+        cudaFree(ws->LQ);
+        ws->LQ = NULL;
+        CUDA_CHECK(cudaMalloc((void **)&ws->LQ, sizeof(int16_t) * lq_count));
+        ws->lq_capacity = lq_count;
+    }
+
+    if (ws->lr_capacity < lr_count) {
+        cudaFree(ws->Lr);
+        ws->Lr = NULL;
+        CUDA_CHECK(cudaMalloc((void **)&ws->Lr, sizeof(int16_t) * lr_count));
+        ws->lr_capacity = lr_count;
+    }
+
+    if (ws->input_llr_capacity < input_llr_count) {
+        cudaFree(ws->input_llr);
+        ws->input_llr = NULL;
+        CUDA_CHECK(cudaMalloc((void **)&ws->input_llr,
+            sizeof(int16_t) * input_llr_count));
+        ws->input_llr_capacity = input_llr_count;
+    }
+
+    if (ws->hardbit_capacity < hardbit_bytes) {
+        cudaFree(ws->hardbits);
+        ws->hardbits = NULL;
+        CUDA_CHECK(cudaMalloc((void **)&ws->hardbits,
+            sizeof(uint8_t) * hardbit_bytes));
+        ws->hardbit_capacity = hardbit_bytes;
+    }
+
+    if (ws->non_zero_capacity < non_zero_elements) {
+        cudaFree(ws->Vij_array);
+        cudaFree(ws->HBG_array);
+        ws->Vij_array = NULL;
+        ws->HBG_array = NULL;
+        CUDA_CHECK(cudaMalloc((void **)&ws->Vij_array,
+            sizeof(uint16_t) * non_zero_elements));
+        CUDA_CHECK(cudaMalloc((void **)&ws->HBG_array,
+            sizeof(uint16_t) * non_zero_elements));
+        ws->non_zero_capacity = non_zero_elements;
+        ws->host_Vij_array = NULL;
+        ws->host_HBG_array = NULL;
+    }
+
+    if (ws->row_offsets_capacity < row_offsets) {
+        cudaFree(ws->HBG_offset_array);
+        ws->HBG_offset_array = NULL;
+        CUDA_CHECK(cudaMalloc((void **)&ws->HBG_offset_array,
+            sizeof(uint16_t) * row_offsets));
+        ws->row_offsets_capacity = row_offsets;
+        ws->host_HBG_offset_array = NULL;
+    }
+
+    return 0;
+}
+
+static int cuda_degree_prepare_tables(
+    cuda_degree_decoder_workspace_t *ws,
+    ldpc_config_t *config,
+    uint16_t non_zero_elements,
+    uint32_t row_offsets)
+{
+    uint16_t bgn = config->bgn;
+    uint16_t Zc = config->Zc;
+    uint16_t iLS = config->iLS;
+
+    if (ws->host_Vij_array != config->Vij_array || ws->cached_bgn != bgn ||
+            ws->cached_Zc != Zc || ws->cached_iLS != iLS) {
+        CUDA_CHECK(cudaMemcpy(ws->Vij_array, config->Vij_array,
+            sizeof(uint16_t) * non_zero_elements, cudaMemcpyHostToDevice));
+        ws->host_Vij_array = config->Vij_array;
+    }
+    if (ws->host_HBG_array != config->HBG_array || ws->cached_bgn != bgn) {
+        CUDA_CHECK(cudaMemcpy(ws->HBG_array, config->HBG_array,
+            sizeof(uint16_t) * non_zero_elements, cudaMemcpyHostToDevice));
+        ws->host_HBG_array = config->HBG_array;
+    }
+    if (ws->host_HBG_offset_array != config->HBG_offset_array ||
+            ws->cached_bgn != bgn) {
+        CUDA_CHECK(cudaMemcpy(ws->HBG_offset_array, config->HBG_offset_array,
+            sizeof(uint16_t) * row_offsets, cudaMemcpyHostToDevice));
+        ws->host_HBG_offset_array = config->HBG_offset_array;
+    }
+
+    ws->cached_bgn = bgn;
+    ws->cached_Zc = Zc;
+    ws->cached_iLS = iLS;
+    return 0;
+}
+
 static __host__ __device__ int16_t cuda_degree_minsum_alpha(uint16_t degree)
 {
     if (degree <= 4) {
@@ -163,8 +286,46 @@ static __global__ void cuda_pack_hardbits_kernel(
     hardbits[byte_idx] = out;
 }
 
-extern "C" int32_t cuda_layered_degree_minsum_ldpc_decode(
-    int16_t *LLr,
+static __global__ void cuda_rate_recover_to_lq_kernel(
+    int16_t *LQ,
+    const int16_t *input_LLr,
+    uint16_t E,
+    uint16_t N,
+    uint16_t k0,
+    uint16_t Zc,
+    uint16_t B,
+    uint16_t K,
+    uint16_t F,
+    uint16_t HARQ_on,
+    int16_t filling_bit_value)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) {
+        return;
+    }
+
+    if (HARQ_on == 0) {
+        for (uint32_t i = 0; i < (uint32_t)N + 2u * Zc; i++) {
+            LQ[i] = 0;
+        }
+    }
+
+    for (uint16_t i = 0; i < F; i++) {
+        LQ[B + i] = filling_bit_value;
+    }
+
+    uint16_t k = 0;
+    uint16_t pos = k0;
+    while (k < E) {
+        if (pos < B - 2u * Zc || pos >= K - 2u * Zc) {
+            LQ[pos + 2u * Zc] = (int16_t)(LQ[pos + 2u * Zc] + input_LLr[k]);
+            k++;
+        }
+        pos = (uint16_t)((pos + 1u) % N);
+    }
+}
+
+static int32_t cuda_degree_decode_device_lq(
+    cuda_degree_decoder_workspace_t *ws,
     uint8_t *hardbits,
     ldpc_config_t *config,
     ldpc_decoder_cfg_t *decoder_cfg)
@@ -183,36 +344,20 @@ extern "C" int32_t cuda_layered_degree_minsum_ldpc_decode(
         num_rows = BG2_NUM_ROWS;
     }
 
-    int16_t *d_LQ = NULL;
-    int16_t *d_Lr = NULL;
-    uint8_t *d_hardbits = NULL;
-    uint16_t *d_Vij_array = NULL;
-    uint16_t *d_HBG_array = NULL;
-    uint16_t *d_HBG_offset_array = NULL;
-
     uint32_t hardbit_bytes = ((uint32_t)config->B + 7u) / 8u;
-    uint32_t row_offsets = (uint32_t)num_rows + 1u;
     uint32_t lr_count = (uint32_t)non_zero_elements * (uint32_t)Zc;
+    uint32_t row_offsets = (uint32_t)num_rows + 1u;
 
-    CUDA_CHECK(cudaMalloc((void **)&d_LQ, sizeof(int16_t) * lq_count));
-    CUDA_CHECK(cudaMalloc((void **)&d_Lr, sizeof(int16_t) * lr_count));
-    CUDA_CHECK(cudaMalloc((void **)&d_hardbits, sizeof(uint8_t) * hardbit_bytes));
-    CUDA_CHECK(cudaMalloc((void **)&d_Vij_array, sizeof(uint16_t) * non_zero_elements));
-    CUDA_CHECK(cudaMalloc((void **)&d_HBG_array, sizeof(uint16_t) * non_zero_elements));
-    CUDA_CHECK(cudaMalloc((void **)&d_HBG_offset_array, sizeof(uint16_t) * row_offsets));
+    if (cuda_degree_ensure_workspace(ws, lq_count, lr_count, config->E,
+            hardbit_bytes, non_zero_elements, row_offsets) != 0) {
+        return -1;
+    }
+    if (cuda_degree_prepare_tables(ws, config, non_zero_elements,
+            row_offsets) != 0) {
+        return -1;
+    }
 
-    CUDA_CHECK(cudaMemcpy(d_LQ, LLr, sizeof(int16_t) * lq_count,
-                          cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(d_Lr, 0, sizeof(int16_t) * lr_count));
-    CUDA_CHECK(cudaMemcpy(d_Vij_array, config->Vij_array,
-                          sizeof(uint16_t) * non_zero_elements,
-                          cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_HBG_array, config->HBG_array,
-                          sizeof(uint16_t) * non_zero_elements,
-                          cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_HBG_offset_array, config->HBG_offset_array,
-                          sizeof(uint16_t) * row_offsets,
-                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(ws->Lr, 0, sizeof(int16_t) * lr_count));
 
     const int threads = 128;
     dim3 layer_blocks((Zc + threads - 1) / threads);
@@ -222,11 +367,11 @@ extern "C" int32_t cuda_layered_degree_minsum_ldpc_decode(
     for (uint16_t iter = 0; iter < decoder_cfg->max_iterations; iter++) {
         for (uint16_t HBG_row = 0; HBG_row < num_rows; HBG_row++) {
             cuda_degree_layer_kernel<<<layer_blocks, threads>>>(
-                d_LQ,
-                d_Lr,
-                d_Vij_array,
-                d_HBG_array,
-                d_HBG_offset_array,
+                ws->LQ,
+                ws->Lr,
+                ws->Vij_array,
+                ws->HBG_array,
+                ws->HBG_offset_array,
                 HBG_row,
                 Zc,
                 (int16_t)decoder_cfg->beta,
@@ -236,9 +381,9 @@ extern "C" int32_t cuda_layered_degree_minsum_ldpc_decode(
         }
 
         cuda_pack_hardbits_kernel<<<hardbit_blocks, threads>>>(
-            d_LQ, d_hardbits, config->B);
+            ws->LQ, ws->hardbits, config->B);
         CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaMemcpy(hardbits, d_hardbits, sizeof(uint8_t) * hardbit_bytes,
+        CUDA_CHECK(cudaMemcpy(hardbits, ws->hardbits, sizeof(uint8_t) * hardbit_bytes,
                               cudaMemcpyDeviceToHost));
 
         if (calculate_crc(hardbits, config->B / 8, config->crctype) == 0) {
@@ -247,14 +392,62 @@ extern "C" int32_t cuda_layered_degree_minsum_ldpc_decode(
         }
     }
 
-    cudaFree(d_HBG_offset_array);
-    cudaFree(d_HBG_array);
-    cudaFree(d_Vij_array);
-    cudaFree(d_hardbits);
-    cudaFree(d_Lr);
-    cudaFree(d_LQ);
-
     return status;
+}
+
+extern "C" int32_t cuda_layered_degree_minsum_ldpc_decode(
+    int16_t *LLr,
+    uint8_t *hardbits,
+    ldpc_config_t *config,
+    ldpc_decoder_cfg_t *decoder_cfg)
+{
+    cuda_degree_decoder_workspace_t *ws = &g_degree_decoder_workspace;
+    uint32_t lq_count = (uint32_t)config->N + 2u * (uint32_t)config->Zc;
+
+    if (cuda_degree_ensure_workspace(ws, lq_count, 1u, config->E,
+            ((uint32_t)config->B + 7u) / 8u, 1u, 1u) != 0) {
+        return -1;
+    }
+
+    CUDA_CHECK(cudaMemcpy(ws->LQ, LLr, sizeof(int16_t) * lq_count,
+                          cudaMemcpyHostToDevice));
+
+    return cuda_degree_decode_device_lq(ws, hardbits, config, decoder_cfg);
+}
+
+extern "C" int32_t cuda_5g_degree_minsum_ldpc_decode(
+    int16_t *input_LLr,
+    uint8_t *hardbits,
+    ldpc_config_t *config,
+    ldpc_decoder_cfg_t *decoder_cfg)
+{
+    cuda_degree_decoder_workspace_t *ws = &g_degree_decoder_workspace;
+    uint32_t lq_count = (uint32_t)config->N + 2u * (uint32_t)config->Zc;
+    uint32_t hardbit_bytes = ((uint32_t)config->B + 7u) / 8u;
+
+    if (cuda_degree_ensure_workspace(ws, lq_count, 1u, config->E,
+            hardbit_bytes, 1u, 1u) != 0) {
+        return -1;
+    }
+
+    CUDA_CHECK(cudaMemcpy(ws->input_llr, input_LLr,
+        sizeof(int16_t) * config->E, cudaMemcpyHostToDevice));
+
+    cuda_rate_recover_to_lq_kernel<<<1, 1>>>(
+        ws->LQ,
+        ws->input_llr,
+        config->E,
+        config->N,
+        config->k0,
+        config->Zc,
+        config->B,
+        config->K,
+        config->F,
+        config->HARQ_on,
+        decoder_cfg->filling_bit_value);
+    CUDA_CHECK(cudaGetLastError());
+
+    return cuda_degree_decode_device_lq(ws, hardbits, config, decoder_cfg);
 }
 
 int32_t layered_degree_minsum_ldpc_decode(

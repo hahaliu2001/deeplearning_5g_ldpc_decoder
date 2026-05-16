@@ -50,16 +50,35 @@ def make_degree_seeded_row_alpha_init(table_config, num_iterations: int) -> np.n
     for row in range(table_config.num_rows):
         degree = table_config.row_offsets[row + 1] - table_config.row_offsets[row]
         if degree <= 4:
-            #row_values.append(0.8125)
-            row_values.append(0.6)
+            row_values.append(0.8125)
+            #row_values.append(0.6)
         elif degree < 8:
-            #row_values.append(0.75)
-            row_values.append(0.6)
+            row_values.append(0.75)
+            #row_values.append(0.6)
         else:
-            #row_values.append(0.6875)
-            row_values.append(0.6)
+            row_values.append(0.6875)
+            #row_values.append(0.6)
 
     return np.tile(np.asarray(row_values, dtype=np.float32), (num_iterations, 1))
+
+
+def alpha_init_from_degree(degree: int) -> float:
+    """Initial alpha schedule keyed by exact HBG row degree."""
+    if degree <= 4:
+        return 0.8125
+    if degree < 8:
+        return 0.75
+    return 0.6875
+
+
+def make_degree_value_alpha_init(table_config) -> Tuple[float, ...]:
+    """Create alpha initial values ordered by sorted unique HBG row degree."""
+    row_degrees = [
+        table_config.row_offsets[row + 1] - table_config.row_offsets[row]
+        for row in range(table_config.num_rows)
+    ]
+    unique_degrees = tuple(sorted(set(row_degrees)))
+    return tuple(alpha_init_from_degree(degree) for degree in unique_degrees)
 
 
 def load_trained_row_alpha_init(
@@ -160,7 +179,7 @@ def train_c_table_ldpc_model(
     alpha_mode: str = "row",
     alpha_min: float = 0.5,
     alpha_max: float = 1.0 - 1e-6,
-    init_alpha_degree_values: Optional[Tuple[float, float, float]] = None,
+    init_alpha_degree_values: Optional[Sequence[float]] = None,
     clip_llr: Optional[float] = None,
     training_noise_power_db_range: Optional[Tuple[float, float]] = None,
     loss_type: str = "bce",
@@ -184,8 +203,8 @@ def train_c_table_ldpc_model(
         raise ValueError("intermediate_loss_stride must be positive")
     if loss_type not in {"bce", "margin"}:
         raise ValueError("loss_type must be 'bce' or 'margin'")
-    if alpha_mode not in {"row", "degree"}:
-        raise ValueError("alpha_mode must be 'row' or 'degree'")
+    if alpha_mode not in {"row", "degree", "degree_value"}:
+        raise ValueError("alpha_mode must be 'row', 'degree', or 'degree_value'")
     if not 0.0 < alpha_min < alpha_max < 1.0:
         raise ValueError("alpha_min and alpha_max must satisfy 0 < alpha_min < alpha_max < 1")
     if llr_margin <= 0:
@@ -535,7 +554,6 @@ if __name__ == "__main__":
     main_num_iterations = 32
     main_alpha_min = 0.5
     main_alpha_max = 1.0 - 1e-6
-    trained_alpha_init_path = "opt1_trained_c_table_ldpc_decoder_bg1.pth"
     main_table_config = load_ldpc_table_config(
         bgn=main_bgn,
         A=main_A,
@@ -545,24 +563,22 @@ if __name__ == "__main__":
         Qm=main_Qm,
         HARQ_on=0,
     )
-    row_init_alpha = make_degree_seeded_row_alpha_init(
-        main_table_config,
-        num_iterations=main_num_iterations,
+    unique_degrees = tuple(
+        sorted(
+            {
+                main_table_config.row_offsets[row + 1] - main_table_config.row_offsets[row]
+                for row in range(main_table_config.num_rows)
+            }
+        )
     )
-    if os.path.exists(trained_alpha_init_path):
-        row_init_alpha = load_trained_row_alpha_init(
-            trained_alpha_init_path,
-            alpha_min=main_alpha_min,
-            alpha_max=main_alpha_max,
-            expected_shape=(main_num_iterations, main_table_config.num_rows),
-        )
-        print(
-            f"loaded init_alpha from {trained_alpha_init_path}: "
-            f"shape={row_init_alpha.shape} "
-            f"min={row_init_alpha.min():.6f} "
-            f"max={row_init_alpha.max():.6f} "
-            f"mean={row_init_alpha.mean():.6f}"
-        )
+    degree_value_init_alpha = make_degree_value_alpha_init(main_table_config)
+    print(
+        "degree_value init_alpha",
+        {
+            "unique_degrees": unique_degrees,
+            "values": degree_value_init_alpha,
+        },
+    )
 
     trained_model, trained_state, trained_loss = train_c_table_ldpc_model(
         bgn=main_bgn,
@@ -576,14 +592,14 @@ if __name__ == "__main__":
         epochs=100,
         batch_size=20,
         lr=1e-3,
-        init_alpha=row_init_alpha,
+        init_alpha=0.75,
         init_beta=0.0,
         learnable_scaling=True,
         learnable_beta=False,
-        alpha_mode="row",
+        alpha_mode="degree_value",
         alpha_min=main_alpha_min,
         alpha_max=main_alpha_max,
-        init_alpha_degree_values=None,
+        init_alpha_degree_values=degree_value_init_alpha,
         training_noise_power_db_range=(5.0, 6.0),
         loss_type="bce",
         llr_margin=5.0,
@@ -625,10 +641,10 @@ if __name__ == "__main__":
         learnable_beta=False,
         init_alpha=0.75,
         init_beta=0.0,
-        alpha_mode="degree",
+        alpha_mode="degree_value",
         alpha_min=trained_model.alpha_min,
         alpha_max=trained_model.alpha_max,
-        init_alpha_degree_values=(0.8125, 0.75, 0.6875),
+        init_alpha_degree_values=degree_value_init_alpha,
     ).to(_infer_model_device(trained_model))
 
     test_results = {}

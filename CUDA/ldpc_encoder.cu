@@ -18,6 +18,81 @@
         }                                                                    \
     } while (0)
 
+typedef struct {
+    uint8_t *in_bits;
+    uint8_t *out_bits;
+    uint8_t *pc;
+    uint16_t *Vij_array;
+    uint16_t *HBG_array;
+    uint16_t *HBG_offset_array;
+    uint32_t in_bits_capacity;
+    uint32_t out_bits_capacity;
+    uint32_t non_zero_capacity;
+    uint32_t row_offsets_capacity;
+    const uint16_t *host_Vij_array;
+    const uint16_t *host_HBG_array;
+    const uint16_t *host_HBG_offset_array;
+    uint16_t cached_bgn;
+    uint16_t cached_Zc;
+    uint16_t cached_iLS;
+} cuda_encoder_workspace_t;
+
+static cuda_encoder_workspace_t g_encoder_workspace;
+
+static int cuda_encoder_ensure_workspace(
+    cuda_encoder_workspace_t *ws,
+    uint32_t in_bits_count,
+    uint32_t out_bits_count,
+    uint32_t non_zero_elements,
+    uint32_t row_offsets)
+{
+    if (ws->in_bits_capacity < in_bits_count) {
+        cudaFree(ws->in_bits);
+        ws->in_bits = NULL;
+        CUDA_CHECK_ENCODE(cudaMalloc((void **)&ws->in_bits,
+            sizeof(uint8_t) * in_bits_count));
+        ws->in_bits_capacity = in_bits_count;
+    }
+
+    if (ws->out_bits_capacity < out_bits_count) {
+        cudaFree(ws->out_bits);
+        ws->out_bits = NULL;
+        CUDA_CHECK_ENCODE(cudaMalloc((void **)&ws->out_bits,
+            sizeof(uint8_t) * out_bits_count));
+        ws->out_bits_capacity = out_bits_count;
+    }
+
+    if (ws->pc == NULL) {
+        CUDA_CHECK_ENCODE(cudaMalloc((void **)&ws->pc,
+            sizeof(uint8_t) * 4u * MAX_ZC));
+    }
+
+    if (ws->non_zero_capacity < non_zero_elements) {
+        cudaFree(ws->Vij_array);
+        cudaFree(ws->HBG_array);
+        ws->Vij_array = NULL;
+        ws->HBG_array = NULL;
+        CUDA_CHECK_ENCODE(cudaMalloc((void **)&ws->Vij_array,
+            sizeof(uint16_t) * non_zero_elements));
+        CUDA_CHECK_ENCODE(cudaMalloc((void **)&ws->HBG_array,
+            sizeof(uint16_t) * non_zero_elements));
+        ws->non_zero_capacity = non_zero_elements;
+        ws->host_Vij_array = NULL;
+        ws->host_HBG_array = NULL;
+    }
+
+    if (ws->row_offsets_capacity < row_offsets) {
+        cudaFree(ws->HBG_offset_array);
+        ws->HBG_offset_array = NULL;
+        CUDA_CHECK_ENCODE(cudaMalloc((void **)&ws->HBG_offset_array,
+            sizeof(uint16_t) * row_offsets));
+        ws->row_offsets_capacity = row_offsets;
+        ws->host_HBG_offset_array = NULL;
+    }
+
+    return 0;
+}
+
 static __global__ void cuda_encoder_init_kernel(
     const uint8_t *in_bits,
     uint8_t *out_bits,
@@ -169,58 +244,60 @@ int32_t nr_ldpc_encode(uint8_t *in_bits, uint8_t *out_bits, ldpc_config_t *ldpc_
     uint16_t non_zero_elements = (bgn == 1) ?
         BG1_MAX_NON_NULL_ELEMENTS : BG2_MAX_NON_NULL_ELEMENTS;
     uint32_t out_count = (uint32_t)K + (uint32_t)num_rows * (uint32_t)Zc;
+    uint32_t row_offsets = (uint32_t)num_rows + 1u;
+    cuda_encoder_workspace_t *ws = &g_encoder_workspace;
 
-    uint8_t *d_in_bits = NULL;
-    uint8_t *d_out_bits = NULL;
-    uint8_t *d_pc = NULL;
-    uint16_t *d_Vij_array = NULL;
-    uint16_t *d_HBG_array = NULL;
-    uint16_t *d_HBG_offset_array = NULL;
+    if (cuda_encoder_ensure_workspace(ws, B, out_count, non_zero_elements,
+            row_offsets) != 0) {
+        return -1;
+    }
 
-    CUDA_CHECK_ENCODE(cudaMalloc((void **)&d_in_bits, sizeof(uint8_t) * B));
-    CUDA_CHECK_ENCODE(cudaMalloc((void **)&d_out_bits, sizeof(uint8_t) * out_count));
-    CUDA_CHECK_ENCODE(cudaMalloc((void **)&d_pc, sizeof(uint8_t) * 4u * MAX_ZC));
-    CUDA_CHECK_ENCODE(cudaMalloc((void **)&d_Vij_array, sizeof(uint16_t) * non_zero_elements));
-    CUDA_CHECK_ENCODE(cudaMalloc((void **)&d_HBG_array, sizeof(uint16_t) * non_zero_elements));
-    CUDA_CHECK_ENCODE(cudaMalloc((void **)&d_HBG_offset_array,
-        sizeof(uint16_t) * ((uint32_t)num_rows + 1u)));
-
-    CUDA_CHECK_ENCODE(cudaMemcpy(d_in_bits, in_bits, sizeof(uint8_t) * B,
+    CUDA_CHECK_ENCODE(cudaMemcpy(ws->in_bits, in_bits, sizeof(uint8_t) * B,
         cudaMemcpyHostToDevice));
-    CUDA_CHECK_ENCODE(cudaMemcpy(d_Vij_array, Vij_array,
-        sizeof(uint16_t) * non_zero_elements, cudaMemcpyHostToDevice));
-    CUDA_CHECK_ENCODE(cudaMemcpy(d_HBG_array, HBG_array,
-        sizeof(uint16_t) * non_zero_elements, cudaMemcpyHostToDevice));
-    CUDA_CHECK_ENCODE(cudaMemcpy(d_HBG_offset_array, HBG_offset_array,
-        sizeof(uint16_t) * ((uint32_t)num_rows + 1u), cudaMemcpyHostToDevice));
-    CUDA_CHECK_ENCODE(cudaMemset(d_pc, 0, sizeof(uint8_t) * 4u * MAX_ZC));
+
+    if (ws->host_Vij_array != Vij_array || ws->cached_bgn != bgn ||
+            ws->cached_Zc != Zc || ws->cached_iLS != ldpc_config->iLS) {
+        CUDA_CHECK_ENCODE(cudaMemcpy(ws->Vij_array, Vij_array,
+            sizeof(uint16_t) * non_zero_elements, cudaMemcpyHostToDevice));
+        ws->host_Vij_array = Vij_array;
+    }
+    if (ws->host_HBG_array != HBG_array || ws->cached_bgn != bgn) {
+        CUDA_CHECK_ENCODE(cudaMemcpy(ws->HBG_array, HBG_array,
+            sizeof(uint16_t) * non_zero_elements, cudaMemcpyHostToDevice));
+        ws->host_HBG_array = HBG_array;
+    }
+    if (ws->host_HBG_offset_array != HBG_offset_array ||
+            ws->cached_bgn != bgn) {
+        CUDA_CHECK_ENCODE(cudaMemcpy(ws->HBG_offset_array, HBG_offset_array,
+            sizeof(uint16_t) * row_offsets, cudaMemcpyHostToDevice));
+        ws->host_HBG_offset_array = HBG_offset_array;
+    }
+    ws->cached_bgn = bgn;
+    ws->cached_Zc = Zc;
+    ws->cached_iLS = ldpc_config->iLS;
+
+    CUDA_CHECK_ENCODE(cudaMemset(ws->pc, 0, sizeof(uint8_t) * 4u * MAX_ZC));
 
     const int threads = 128;
     cuda_encoder_init_kernel<<<(out_count + threads - 1) / threads, threads>>>(
-        d_in_bits, d_out_bits, B, K, (uint16_t)out_count);
+        ws->in_bits, ws->out_bits, B, K, (uint16_t)out_count);
     CUDA_CHECK_ENCODE(cudaGetLastError());
 
     cuda_encoder_first_parity_kernel<<<1, MAX_ZC>>>(
-        d_out_bits, d_pc, d_Vij_array, d_HBG_array, d_HBG_offset_array,
+        ws->out_bits, ws->pc, ws->Vij_array, ws->HBG_array,
+        ws->HBG_offset_array,
         bgn, Zc, K, Kb);
     CUDA_CHECK_ENCODE(cudaGetLastError());
 
     uint32_t remaining_items = (uint32_t)(num_rows - 4u) * (uint32_t)Zc;
     cuda_encoder_remaining_parity_kernel<<<
         (remaining_items + threads - 1) / threads, threads>>>(
-        d_out_bits, d_Vij_array, d_HBG_array, d_HBG_offset_array,
+        ws->out_bits, ws->Vij_array, ws->HBG_array, ws->HBG_offset_array,
         num_rows, Zc, K, Kb);
     CUDA_CHECK_ENCODE(cudaGetLastError());
 
-    CUDA_CHECK_ENCODE(cudaMemcpy(out_bits, d_out_bits, sizeof(uint8_t) * out_count,
+    CUDA_CHECK_ENCODE(cudaMemcpy(out_bits, ws->out_bits, sizeof(uint8_t) * out_count,
         cudaMemcpyDeviceToHost));
-
-    cudaFree(d_HBG_offset_array);
-    cudaFree(d_HBG_array);
-    cudaFree(d_Vij_array);
-    cudaFree(d_pc);
-    cudaFree(d_out_bits);
-    cudaFree(d_in_bits);
 
     return 0;
 }

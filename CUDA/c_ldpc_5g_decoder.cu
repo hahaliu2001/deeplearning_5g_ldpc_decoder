@@ -6,6 +6,12 @@
 
 #include "nr_ldpc.h"
 
+extern "C" int32_t cuda_5g_degree_minsum_ldpc_decode(
+    int16_t *input_LLr,
+    uint8_t *hardbits,
+    ldpc_config_t *config,
+    ldpc_decoder_cfg_t *decoder_cfg);
+
 /********* LDPC Decoder Main Function *********/
 int32_t c_ldpc_5g_decode(int16_t *LLr, uint8_t *hardbits, ldpc_in_config_t *inconfig, ldpc_decoder_cfg_t *decoder_config) {
     ldpc_config_t ldpc_config;
@@ -18,6 +24,12 @@ int32_t c_ldpc_5g_decode(int16_t *LLr, uint8_t *hardbits, ldpc_in_config_t *inco
         return -2; // Invalid ldpc configuration
     }
 
+    if (decoder_config->algo == 3) {
+        // CUDA path: rate recovery writes directly to device LQ, then the
+        // layered degree-minsum decoder runs on that device buffer.
+        return cuda_5g_degree_minsum_ldpc_decode(LLr, hardbits,
+            &ldpc_config, decoder_config);
+    }
 
     //perform rate recovery and HARQ combining if needed, the output is stored in HARQ_memory
     nr_ldpc_rate_recover_harq_combine(&ldpc_config, decoder_config->filling_bit_value, LLr);

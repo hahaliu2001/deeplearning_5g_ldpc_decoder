@@ -124,9 +124,6 @@ decoder_config_list = [
     
     #0.7*32767=22936
     [1,    32,  22936,  0,  1280, 32767, -32768],
-
-    #0.75*32767=24575
-    [1,    32,  24575,  0,  1280, 32767, -32768],
     
     #alpha/beta fields are ignored by algo 2; it uses BG1/BG2_trained_*_list.
     [2,    32,  0,  0,  1280, 32767, -32768],
@@ -137,7 +134,6 @@ decoder_config_list = [
 decoder_name_list = [
     "layered-BP",
     "single-alpha min-sum alpha=0.70 beta=0",
-    "single-alpha min-sum alpha=0.75 beta=0",
     "trained-table neural min-sum",
     "degree alpha min-sum",
 ]

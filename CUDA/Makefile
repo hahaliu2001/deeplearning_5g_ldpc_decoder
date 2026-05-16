@@ -1,7 +1,7 @@
 CUDA12_BIN ?= /usr/bin
 PATH := $(CUDA12_BIN):$(PATH)
 export PATH
-NVCC ?= /usr/bin/nvcc
+NVCC ?= /usr/local/cuda/bin/nvcc
 
 CUDAFLAGS = -O3 -Xcompiler -fPIC -cudart shared -I ../c_lib
 LDFLAGS = -shared -lm

@@ -209,10 +209,13 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         alpha_mode: ``"row"`` trains one alpha per iteration/HBG row.
             ``"degree"`` trains one alpha per iteration/degree bucket:
             degree <= 4, 5 <= degree <= 8, and degree > 8.
+            ``"degree_value"`` trains one alpha per iteration/exact row-degree
+            value, so rows with the same degree share alpha.
         alpha_min: minimum normalized min-sum alpha after sigmoid mapping.
         alpha_max: maximum normalized min-sum alpha after sigmoid mapping.
-        init_alpha_degree_values: optional three alpha initial values for
-            ``alpha_mode="degree"``.
+        init_alpha_degree_values: optional alpha initial values for
+            degree-based modes. Provide three values for ``alpha_mode="degree"``
+            or one value per unique row degree for ``alpha_mode="degree_value"``.
         clip_llr: optional LLR clipping value. ``None`` disables clipping.
 
     Input LLR shape is ``[batch, N + 2*Zc]`` or ``[N + 2*Zc]``, matching the
@@ -234,12 +237,10 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         clip_llr: Optional[float] = None,
     ) -> None:
         super().__init__()
-        if alpha_mode not in {"row", "degree"}:
-            raise ValueError("alpha_mode must be 'row' or 'degree'")
+        if alpha_mode not in {"row", "degree", "degree_value"}:
+            raise ValueError("alpha_mode must be 'row', 'degree', or 'degree_value'")
         if not 0.0 < alpha_min < alpha_max < 1.0:
             raise ValueError("alpha_min and alpha_max must satisfy 0 < alpha_min < alpha_max < 1")
-        if init_alpha_degree_values is not None and len(init_alpha_degree_values) != 3:
-            raise ValueError("init_alpha_degree_values must contain three values")
 
         self.config = table_config
         self.num_iterations = int(num_iterations)
@@ -257,16 +258,26 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
             table_config.row_offsets[row + 1] - table_config.row_offsets[row]
             for row in range(self.num_rows)
         ]
+        unique_degrees = tuple(sorted(set(row_degrees)))
         degree_buckets = torch.tensor(
             [_degree_alpha_bucket(degree) for degree in row_degrees],
             dtype=torch.long,
         )
+        degree_value_to_index = {degree: idx for idx, degree in enumerate(unique_degrees)}
+        degree_value_indices = torch.tensor(
+            [degree_value_to_index[degree] for degree in row_degrees],
+            dtype=torch.long,
+        )
+        self.unique_row_degrees = unique_degrees
         self.register_buffer("row_alpha_buckets", degree_buckets)
+        self.register_buffer("row_alpha_degree_values", degree_value_indices)
 
         if alpha_mode == "degree":
             if not isinstance(init_alpha, (int, float)):
                 raise ValueError("init_alpha must be a scalar when alpha_mode='degree'")
             degree_init_values = init_alpha_degree_values or (init_alpha, init_alpha, init_alpha)
+            if len(degree_init_values) != 3:
+                raise ValueError("init_alpha_degree_values must contain three values")
             raw_alpha_init = torch.stack(
                 [
                     _inverse_bounded_sigmoid(value, self.alpha_min, self.alpha_max)
@@ -274,6 +285,41 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
                 ]
             )
             raw_alpha = raw_alpha_init.unsqueeze(0).repeat(self.num_iterations, 1)
+        elif alpha_mode == "degree_value":
+            num_unique_degrees = len(unique_degrees)
+            if init_alpha_degree_values is not None:
+                if len(init_alpha_degree_values) != num_unique_degrees:
+                    raise ValueError(
+                        "init_alpha_degree_values must contain one value per unique "
+                        f"row degree {unique_degrees}; got {len(init_alpha_degree_values)}"
+                    )
+                raw_alpha_init = torch.stack(
+                    [
+                        _inverse_bounded_sigmoid(value, self.alpha_min, self.alpha_max)
+                        for value in init_alpha_degree_values
+                    ]
+                )
+                raw_alpha = raw_alpha_init.unsqueeze(0).repeat(self.num_iterations, 1)
+            elif isinstance(init_alpha, (int, float)):
+                raw_alpha = _inverse_bounded_sigmoid(
+                    float(init_alpha),
+                    self.alpha_min,
+                    self.alpha_max,
+                ).repeat(self.num_iterations, num_unique_degrees)
+            else:
+                init_alpha_tensor = torch.as_tensor(init_alpha, dtype=torch.float32)
+                expected_shape = (self.num_iterations, num_unique_degrees)
+                if tuple(init_alpha_tensor.shape) != expected_shape:
+                    raise ValueError(
+                        "init_alpha must be a scalar or have shape "
+                        f"{expected_shape} when alpha_mode='degree_value'; "
+                        f"got {tuple(init_alpha_tensor.shape)}"
+                    )
+                raw_alpha = _inverse_bounded_sigmoid_tensor(
+                    init_alpha_tensor,
+                    self.alpha_min,
+                    self.alpha_max,
+                )
         else:
             if isinstance(init_alpha, (int, float)):
                 raw_alpha = _inverse_bounded_sigmoid(
@@ -329,6 +375,8 @@ class CTableNeuralLayeredMinSumDecoder(nn.Module):
         alpha = alpha.clamp(min=self.alpha_min, max=self.alpha_max)
         if self.alpha_mode == "degree":
             return alpha.index_select(1, self.row_alpha_buckets.to(device=alpha.device))
+        if self.alpha_mode == "degree_value":
+            return alpha.index_select(1, self.row_alpha_degree_values.to(device=alpha.device))
         return alpha
 
     def beta(self) -> torch.Tensor:
