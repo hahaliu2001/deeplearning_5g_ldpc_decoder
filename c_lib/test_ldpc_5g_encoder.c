@@ -3,85 +3,61 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <limits.h>
-#include <libgen.h>
 
 #include "nr_ldpc.h"
 
-uint8_t info_bits[8448]; // 
-uint8_t info_bytes[8448/8]; // Size should be ceil(K/8) bytes for storing K bits
+// Buffers for the generated encoder smoke-test input and output.
+uint8_t info_bits[8448];
+uint8_t info_bytes[8448/8];
 ldpc_in_config_t inconfig;
 uint8_t c_rmbytes[8448*256];
 
-int32_t load_test1_testdata_from_binary_file() {
-    char cwd[PATH_MAX];
-    char prefolder[PATH_MAX]; // Define it here so it exists for the whole function
-    char full_path[PATH_MAX+64];
-
-    if (getcwd(cwd, sizeof(cwd)) != NULL) {
-        // basename() extracts the folder name from the full path
-        char *folder_name = basename(cwd);
-
-        if (strcmp(folder_name, "c_lib") == 0) {
-            printf("Confirmed: You are inside the 'c_lib' folder.\n");
-            strcpy(prefolder, "../out/"); 
-        } else {
-            printf("Notice: Current folder is '%s', not 'c_lib'.\n", folder_name);
-            strcpy(prefolder, "out/");
-        }
-    } else {
-        perror("getcwd() error");
-        return 1;
-    }
-    
-    //load info bits from binary file for testing
-    snprintf(full_path, sizeof(full_path), "%sencode_info_bits.bin", prefolder);
-    FILE *f  = fopen(full_path, "rb");
-    if (f == NULL) {
-        perror("Failed to open info_bits.bin");
-        return 1;
-    }
-    fread(info_bits, sizeof(uint8_t), sizeof(info_bits), f); // Read ceil(K/8) bytes of info bits
-    fclose(f);
-    
-    //load info bytes from binary file for testing
-    snprintf(full_path, sizeof(full_path), "%sencode_info_bytes.bin", prefolder);
-    f = fopen(full_path, "rb");
-    if (f == NULL) {
-        perror("Failed to open info_bytes.bin");
-        return 1;
-    }
-    fread(info_bytes, sizeof(uint8_t), sizeof(info_bytes), f); // Read ceil(K/8) bytes of info bytes
-    fclose(f);
-
+/*
+ * Fill the LDPC configuration used by this smoke test.
+ */
+static void init_test_config(void) {
     inconfig.A = 512-24;
     inconfig.bgn = 1;
-    inconfig.crctype = 1; // crc24a
+    inconfig.crctype = 1; // CRC24A.
     inconfig.E = 512*3;
     inconfig.rv = 0;
-    inconfig.Qm = 1; // BPSK
+    inconfig.Qm = 1; // BPSK.
     inconfig.HARQ_on = 0;
-   
-    return 0;
+}
+
+/*
+ * Generate random input bits and pack them MSB-first into bytes.
+ *
+ * c_ldpc_5g_encode() unpacks bit 0 from bit 7 of info_bytes[0], matching
+ * numpy.packbits(..., bitorder="big") in the Python tests.
+ */
+static void generate_random_info_bytes(void) {
+    size_t num_bytes = (inconfig.A + 7) / 8;
+
+    memset(info_bytes, 0, num_bytes);
+    for (uint16_t i = 0; i < inconfig.A; i++) {
+        uint8_t bit = (uint8_t)(rand() & 0x01);
+        uint16_t byte_idx = i / 8;
+        uint16_t bit_pos = 7 - (i % 8);
+
+        info_bits[i] = bit;
+        info_bytes[byte_idx] |= (uint8_t)(bit << bit_pos);
+    }
 }
 
 int main() {
-    // read LLRs and info bits from binary files for testing C implementation
-    int32_t status = load_test1_testdata_from_binary_file();
-    if (status != 0) {
-        fprintf(stderr, "Failed to load test data from binary files\n");
-        return 1;
-    }
+    // Configure one BG1 code block and generate a fresh random payload.
+    srand(0);
+    init_test_config();
+    generate_random_info_bytes();
     
-    //call ldpc_5g_decode function from C implementation
-    int32_t result = c_ldpc_5g_encode(info_bytes, c_rmbytes,&inconfig);
+    // Run the public C encoder wrapper.
+    int32_t result = c_ldpc_5g_encode(info_bytes, c_rmbytes, &inconfig);
 
     if (result == 0) {
-        printf("Decoding successful!\n");
-        // Process hardbits as needed
+        printf("Encoding successful!\n");
     } else {
-        printf("Decoding failed to converge within max iterations.\n");
+        printf("Encoding failed with status %d.\n", result);
     }
     return 0;
 }

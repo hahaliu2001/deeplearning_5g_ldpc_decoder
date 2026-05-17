@@ -1,12 +1,15 @@
 # -*- coding:utf-8 -*-
+"""256QAM soft demodulator."""
+
 import numpy as np
-import math
+from py5gphy.demodulation._common import hardbits_from_llr
 
 def demod(insymbols,noise_var):
-    """256QAM demodulation
-    """
-    A = 1/math.sqrt(170)
+    """Demodulate 256QAM symbols and return hard bits plus LLRs."""
+    A = 1 / np.sqrt(170)
     LLR = np.zeros(8*insymbols.size,dtype='f')
+    # Compute LLRs by significance level. Each helper is reused for the I and Q
+    # axes, then the results are interleaved into the NR bit order.
     LLR[0::8] = LLR_256qam_bit_0_1(insymbols.real,noise_var,A)
     LLR[1::8] = LLR_256qam_bit_0_1(insymbols.imag,noise_var,A)
     
@@ -19,11 +22,11 @@ def demod(insymbols,noise_var):
     LLR[6::8] = LLR_256qam_bit_6_7(insymbols.real,noise_var,A)
     LLR[7::8] = LLR_256qam_bit_6_7(insymbols.imag,noise_var,A)
 
-    hardbits = np.array([0 if a>0 else 1 for a in LLR])
+    hardbits = hardbits_from_llr(LLR)
     return hardbits,LLR
 
 def LLR_256qam_bit_0_1(insym, noise_var,A):
-    """ 256QAM b0 and b1 LLR"""
+    """Calculate MSB LLRs for the I or Q axis of a 256QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -61,7 +64,7 @@ def LLR_256qam_bit_0_1(insym, noise_var,A):
     return LLR
 
 def LLR_256qam_bit_2_3(insym, noise_var,A):
-    """ 256QAM b2 and b3 LLR"""
+    """Calculate second-level LLRs for the I or Q axis of a 256QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -97,7 +100,7 @@ def LLR_256qam_bit_2_3(insym, noise_var,A):
     return LLR
 
 def LLR_256qam_bit_4_5(insym, noise_var,A):
-    """ 256QAM b4 and b5 LLR"""
+    """Calculate third-level LLRs for the I or Q axis of a 256QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -129,7 +132,7 @@ def LLR_256qam_bit_4_5(insym, noise_var,A):
     return LLR
 
 def LLR_256qam_bit_6_7(insym, noise_var,A):
-    """ 256QAM b6 and b7 LLR"""
+    """Calculate LSB LLRs for the I or Q axis of a 256QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -151,11 +154,3 @@ def LLR_256qam_bit_6_7(insym, noise_var,A):
             LLR[m] = 4*A*(-r+14*A)/noise_var[m]
     
     return LLR
-
-
-if __name__ == "__main__":
-    noise_var = 0.015848931924611138
-    insymbols = np.array([0.3807394725225532-0.640731394345522j])
-    hardbits,LLR = demod(insymbols,noise_var*np.ones(insymbols.size))
-
-    aaa=1

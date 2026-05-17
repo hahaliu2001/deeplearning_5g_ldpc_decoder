@@ -1,24 +1,26 @@
 # -*- coding:utf-8 -*-
+"""16QAM soft demodulator."""
+
 import numpy as np
-import math
+from py5gphy.demodulation._common import hardbits_from_llr
 
 def demod(insymbols,noise_var):
-    """16QAM demodulation
-    """
-    
-    A = 1/math.sqrt(10)
+    """Demodulate 16QAM symbols and return hard bits plus LLRs."""
+    A = 1 / np.sqrt(10)
     LLR = np.zeros(4*insymbols.size,dtype='f')
+    # LLR output follows the NR bit order: I-axis bit, Q-axis bit, repeated by
+    # significance level for each modulation symbol.
     LLR[0::4] = LLR_16qam_bit_0_1(insymbols.real,noise_var,A)
     LLR[1::4] = LLR_16qam_bit_0_1(insymbols.imag,noise_var,A)
     
     LLR[2::4] = LLR_16qam_bit_2_3(insymbols.real,noise_var,A)
     LLR[3::4] = LLR_16qam_bit_2_3(insymbols.imag,noise_var,A)
 
-    hardbits = np.array([0 if a>0 else 1 for a in LLR])
+    hardbits = hardbits_from_llr(LLR)
     return hardbits,LLR
 
 def LLR_16qam_bit_0_1(insym, noise_var,A):
-    """ 16QAM b0 and b1 LLR"""
+    """Calculate MSB LLRs for the I or Q axis of a 16QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -32,7 +34,7 @@ def LLR_16qam_bit_0_1(insym, noise_var,A):
     return LLR
 
 def LLR_16qam_bit_2_3(insym, noise_var,A):
-    """ 16QAM b2 and b3 LLR"""
+    """Calculate LSB LLRs for the I or Q axis of a 16QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]

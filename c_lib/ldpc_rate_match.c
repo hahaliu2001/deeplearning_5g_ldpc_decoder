@@ -7,15 +7,25 @@
 
 #include "nr_ldpc.h"
 
-//maximum rate matching outbut bits size = 100PRB*12sc*14symbol*8(256QAM)*4(layers)
+// Maximum supported rate-matched bit count:
+// 100 PRB * 12 subcarriers * 14 OFDM symbols * 8 bits/symbol (256QAM) * 4 layers.
 #define MAX_E (100*12*14*8*4)
 static uint8_t ek[MAX_E];
-/*5g ldpc rate matching
-dn: input sequence with size = N
-ek: rat matching output with size = E/8 bytes
-*/
+
+/*
+ * Perform 5G LDPC rate matching.
+ *
+ * Inputs:
+ *   inbits: Encoded LDPC code block bits. The first 2*Zc systematic bits are
+ *       punctured by rate matching.
+ *   outbytes: Packed output buffer for E selected and interleaved bits.
+ *   config: Derived LDPC configuration, including E, N, K, k0, Zc, B, and Qm.
+ *
+ * Outputs:
+ *   outbytes contains the rate-matched bit stream, packed MSB-first.
+ */
 void nr_ldpc_rate_match(uint8_t *inbits, uint8_t *outbytes,ldpc_config_t *config) {
-    //read parameters from config
+    // Read the parameters needed by 38.212 section 5.4.2.
     uint16_t E = config->E;
     uint16_t N = config->N;
     uint16_t k0 = config->k0;
@@ -25,21 +35,22 @@ void nr_ldpc_rate_match(uint8_t *inbits, uint8_t *outbytes,ldpc_config_t *config
     uint16_t K = config->K;
 
     uint8_t *outptr = outbytes;
-    //rate match input need bypass first 2*Zc data
+    // Rate matching starts after the first 2*Zc punctured systematic bits.
     uint8_t *rm_in = inbits + 2*Zc;
 
-    // bit selection 38.212 5.4.2.1
+    // Bit selection, 3GPP TS 38.212 section 5.4.2.1.
     int k=0;
     int j = 0;
     while(k < E) {
         int pos = (k0+j) % N;
         if(pos < B-2*Zc || pos >= K-2*Zc) {
-            //not filling bit
+            // Skip filler-bit positions; keep all other circular-buffer bits.
             ek[k++] = rm_in[pos];
         }
         j++;
     }
-    // bit interleaving 38.212 5.4.2.2
+
+    // Bit interleaving, 3GPP TS 38.212 section 5.4.2.2, then pack MSB-first.
     int bit_pos = 8;
     uint8_t dbyte = 0;
     for(j=0; j<E/Qm; j++) {
@@ -47,7 +58,7 @@ void nr_ldpc_rate_match(uint8_t *inbits, uint8_t *outbytes,ldpc_config_t *config
             dbyte += ek[i*E/Qm+j] << (bit_pos-1);
             bit_pos--;
             if(bit_pos == 0) {
-                //write byte to out bufer, reset dbyte and bit_pos
+                // Flush one complete output byte.
                 *outptr++ = dbyte;
                 dbyte = 0;
                 bit_pos = 8;
@@ -55,7 +66,7 @@ void nr_ldpc_rate_match(uint8_t *inbits, uint8_t *outbytes,ldpc_config_t *config
         }
     }
 
-    //if E % 8 !=0. residul byte
+    // Flush the final partial byte when E is not byte-aligned.
     if(E % 8) {
         *outptr = dbyte;
     }

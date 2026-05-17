@@ -1,11 +1,13 @@
 # -*- coding:utf-8 -*-
+"""BPSK soft demodulator."""
+
 import numpy as np
-import math
+from py5gphy.demodulation._common import hardbits_from_llr
 
 def demod(insymbols,noise_var):
-    """bpsk demodulation
-    """
-    A = 1/math.sqrt(2)
+    """Demodulate BPSK symbols and return hard bits plus LLRs."""
+    A = 1 / np.sqrt(2)
+    # BPSK symbols are mapped onto the diagonal, so both I and Q carry the bit.
     LLR = 4*(insymbols.real+insymbols.imag)*A/noise_var
-    hardbits = np.array([0 if a>0 else 1 for a in LLR])
+    hardbits = hardbits_from_llr(LLR)
     return hardbits,LLR

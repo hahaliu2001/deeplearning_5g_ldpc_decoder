@@ -7,40 +7,50 @@
 
 #include "nr_ldpc.h"
 
+/*
+ * Perform LDPC rate recovery and optional HARQ combining.
+ *
+ * Inputs:
+ *   config: Derived LDPC configuration, including E, N, K, B, F, k0, and Zc.
+ *   filling_bit_value: LLR assigned to filler-bit positions.
+ *   input_LLr: E received LLRs after demodulation and deinterleaving.
+ *
+ * Outputs:
+ *   HARQ_memory is populated with the recovered decoder input layout:
+ *     [punctured 2*Zc bits][information/filler bits][parity bits].
+ *   If HARQ_on is enabled, new LLRs are added to existing HARQ_memory values.
+ */
 void nr_ldpc_rate_recover_harq_combine(ldpc_config_t *config, int16_t filling_bit_value, int16_t *input_LLr) {
-    // This function performs LDPC rate recovery based on the input configuration and input LLR.
-    // The output bits are stored in HARQ_memory.
-
-    //read parameters from config
+    // Read the circular-buffer parameters used by 38.212 rate recovery.
     uint16_t E = config->E;
     uint16_t N = config->N;
     uint16_t k0 = config->k0;
     uint16_t Zc = config->Zc;
 
-    //clean memory if not HARQ combining
+    // Start from a clean buffer unless this call is combining with prior HARQ data.
     if(config->HARQ_on == 0){
         memset(HARQ_memory, 0, sizeof(int16_t)*(N+2*Zc));
     }
 
-    //fill filling bits with filling_bit_LLRvalue
+    // Restore filler-bit positions with a strong known-bit LLR.
     for (uint16_t i = 0; i < config->F; i++) {
         HARQ_memory[config->B+i] = filling_bit_value;
     }
 
-    //rate matching data is [2*Zc:B,K:E]
-    // rate recover data shall put back to[2*Zc:B, K:N+2*Zc]
+    // Rate matching selected bits from the circular buffer excluding filler
+    // positions. Put received LLRs back into their decoder-buffer positions.
     uint16_t k=0; //index for input LLR
     uint16_t pos = k0; 
     while(k < E){
-        //if it is information bit position
+        // Information/systematic region after the punctured first 2*Zc bits.
         if(pos < config->B - 2*Zc){ 
-            HARQ_memory[pos+2*Zc] += input_LLr[k++]; //HARQ combining by summing LLRs
+            HARQ_memory[pos+2*Zc] += input_LLr[k++]; // HARQ combining: sum LLRs.
         }
 
-        //if it is parity bit position
+        // Parity region. Positions between B-2*Zc and K-2*Zc are filler bits.
         else if(pos >= config->K - 2*Zc){
-            HARQ_memory[pos+2*Zc] += input_LLr[k++]; //HARQ combining by summing LLRs
+            HARQ_memory[pos+2*Zc] += input_LLr[k++]; // HARQ combining: sum LLRs.
         }
-        pos = (pos + 1) % N; //index in the circular bufferidx++;
+        pos = (pos + 1) % N; // Next position in the circular buffer.
     }
 }

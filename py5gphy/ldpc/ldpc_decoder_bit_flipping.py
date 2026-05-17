@@ -1,91 +1,107 @@
 # -*- coding:utf-8 -*-
+"""Bit-flipping LDPC decoder, hardbits decoding, worst performance"""
+
+if __name__ == "__main__" and not __package__:
+    from pathlib import Path
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import numpy as np
-import time
 
 from py5gphy.crc import crc
 
-def ldpc_decoder_BF(LLRin, H, crcpoly, B, L):
-    """bit flipping decoding algorithm
-       input:
-            LLRin: N length LDPC decoder LLR input data
-            H: M*N parity check matrix
-            L: maximum iterations
-            crcpoly: crc
-            B: payload size after CRC
-        output:
-            ck: N size of decoded bits, 
-            status: True or False
+
+def _hard_decision(llr):
+    """Convert LLR values to hard bits: positive means 0, negative means 1."""
+    # A zero LLR is treated as bit 0, matching the convention used by the soft
+    # LDPC decoders in this package.
+    bits = np.zeros(llr.size, dtype="i1")
+    bits[llr < 0] = 1
+    return bits
+
+
+def _syndrome(H, bits):
+    """Return the parity-check syndrome for the current hard decisions."""
+    # A zero syndrome means all parity checks pass.
+    return (H @ bits.T) % 2
+
+
+def _flip_metric(H, syndrome):
+    """Return the bit-flipping metric for each variable node.
+
+    For irregular LDPC matrices, ``S @ H`` alone is not sufficient. The
+    ``2*S - 1`` term rewards bits connected to failed checks and penalizes bits
+    connected to satisfied checks.
     """
+    # Unsatisfied checks have syndrome 1 and contribute +1; satisfied checks
+    # have syndrome 0 and contribute -1. Bits with larger metrics are connected
+    # to more failed checks and are stronger flip candidates.
+    return (2 * syndrome - 1) @ H
 
-    M = H.shape[0]
-    N = H.shape[1]
-    K = N - M
 
-    #validate
-    assert LLRin.size == N
+def ldpc_decoder_BF(LLRin, H, crcpoly, B, L):
+    """Decode one LDPC code block with the bit-flipping algorithm.
 
-    #generate A list and B list
-    # A list contain sublist of all variable nodes index that connect to check node j
-    # correspondent to each line of H
-    #for examnple, A[0] is a list of variable nodes index that connect to check node 0
-    A=[]
-    for m in range(M):
-        idxlist = list(np.where(H[m,:] == 1)[0])
-        A.append(idxlist)
-    
-    # B list contain sublist of all check nodes index that connect to variable node i
-    # correspondent to each column of H
-    #for examnple, B[1] is a list of check nodes index that connect to variable node 1
-    B=[]
-    for n in range(N):
-        idxlist = list(np.where(H[:,n] == 1)[0])
-        B.append(idxlist)
-    
-    #hard coded LLRin to generate ck bit sequence, LLR >0 ->0, LLR<0 -> 1
-    ck = np.copy(LLRin)
-    ck[ck > 0] = 0
-    ck[ck < 0 ] = 1
+    Args:
+        LLRin: Length-``N`` decoder input LLR sequence.
+        H: ``M x N`` LDPC parity-check matrix.
+        crcpoly: CRC polynomial name accepted by ``crc.nr_crc_decode``.
+        B: Number of decoded bits to check with CRC.
+        L: Maximum number of bit-flipping iterations.
 
-    #main loop
-    for iter in range(L):
-        S = (H @ ck.T) % 2
-        #most of paper provide below S calculation which is exact the same with above matrix multiply.
-        #for python, matrix multiply is much faster than below implementation
-        #S = np.zeros(M,'i1')
-        #for m in range(M):
-        #    S[m] = sum(ck[A[m]]) % 2
-        
-        if not np.any(S): 
-            #if S is all zero sequence, decoding success, return Tue
-            return ck, True
-        
-        #process if S is not all zero
-        
-        #En = S @ H #some paper use this equation, but it only works for regular LDPC, 5G use non-regular LDPC matrix
-        En = (2*S-1) @ H #this is correct equation
-        #most of paper provide below S calculation which is exact the same with above matrix multiply.
-        #for python, matrix multiply is much faster than below implementation
-        #En = np.zeros(N, 'i1')
-        #for n in range(N):
-        #    En[n] = sum(2*S[B[n]]-1)
-        max_value = np.max(En)
+    Returns:
+        decoded_bits: CRC-stripped payload bits when CRC passes; otherwise the
+            first ``B`` hard-decision bits from the final iteration.
+        status: ``True`` if decoding succeeds, otherwise ``False``.
+    """
+    num_cols = H.shape[1]
+    assert LLRin.size == num_cols
 
-        #bit flip any ck bits with En value==max_value
-        ck[En==max_value] = 1- ck[En==max_value]
+    # Start from the channel hard decision before applying parity feedback.
+    hard_bits = _hard_decision(LLRin)
+    decoded_bits = hard_bits[:B].copy()
 
-        blk,status = crc.nr_crc_decode(ck, crcpoly)
+    for _ in range(L):
+        # Check whether the current hard decision is already a valid codeword.
+        syndrome = _syndrome(H, hard_bits)
+        if not np.any(syndrome):
+            return hard_bits, True
+
+        # Rank all variable nodes by how strongly they are connected to failed
+        # parity checks, then flip every bit tied for the largest metric.
+        metric = _flip_metric(H, syndrome)
+        max_metric = np.max(metric)
+        hard_bits[metric == max_metric] = 1 - hard_bits[metric == max_metric]
+
+        # Use CRC as the early-stop criterion for the decoded payload bits.
+        decoded_bits = hard_bits[:B].copy()
+        blk, status = crc.nr_crc_decode(decoded_bits, crcpoly)
         if status == 0:
             return blk, True
-    
-    #reach max iterations, and S still not all zero
-    return blk, False
+
+    # Decoding failed within the iteration budget. Return the best current hard
+    # decisions for the payload region so callers can inspect the failure.
+    return decoded_bits, False
+
 
 if __name__ == "__main__":
-    from py5gphy.crc import crc
-    from py5gphy.ldpc import nr_ldpc_encode
-    from py5gphy.ldpc import ldpc_info
-    import time
+    # Tiny parity-check example, useful for direct IDE execution. The example
+    # only exercises the bit-flipping loop; production LDPC matrices are loaded
+    # through py5gphy.ldpc.ldpc_info.
+    H = np.array(
+        [
+            [1, 1, 0, 1],
+            [0, 1, 1, 1],
+        ],
+        dtype="i1",
+    )
+    llr = np.array([3.0, -2.0, 2.0, 2.5], dtype=np.float32)
+    hard_bits = _hard_decision(llr)
+    syndrome = _syndrome(H, hard_bits)
+    metric = _flip_metric(H, syndrome)
 
-    print("test LDPC BF decoder")
-    
-
+    print("LDPC bit-flipping helper example")
+    print(f"  hard bits : {hard_bits.tolist()}")
+    print(f"  syndrome  : {syndrome.tolist()}")
+    print(f"  metric    : {metric.tolist()}")

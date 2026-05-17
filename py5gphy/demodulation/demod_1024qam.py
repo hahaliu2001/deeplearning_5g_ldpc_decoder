@@ -1,12 +1,15 @@
 # -*- coding:utf-8 -*-
+"""1024QAM soft demodulator."""
+
 import numpy as np
-import math
+from py5gphy.demodulation._common import hardbits_from_llr
 
 def demod(insymbols,noise_var):
-    """1024QAM demodulation
-    """
-    A = 1/math.sqrt(682)
+    """Demodulate 1024QAM symbols and return hard bits plus LLRs."""
+    A = 1 / np.sqrt(682)
     LLR = np.zeros(10*insymbols.size,dtype='f')
+    # The 1024QAM approximation is expressed as piecewise-linear LLRs for each
+    # bit significance level. Apply each helper to I and Q, then interleave.
     LLR[0::10] = LLR_1024qam_bit_0_1(insymbols.real,noise_var,A)
     LLR[1::10] = LLR_1024qam_bit_0_1(insymbols.imag,noise_var,A)
     
@@ -22,11 +25,11 @@ def demod(insymbols,noise_var):
     LLR[8::10] = LLR_1024qam_bit_8_9(insymbols.real,noise_var,A)
     LLR[9::10] = LLR_1024qam_bit_8_9(insymbols.imag,noise_var,A)
 
-    hardbits = np.array([0 if a>0 else 1 for a in LLR])
+    hardbits = hardbits_from_llr(LLR)
     return hardbits,LLR
 
 def LLR_1024qam_bit_0_1(insym, noise_var,A):
-    """ 1024QAM b0 and b1 LLR"""
+    """Calculate MSB LLRs for the I or Q axis of a 1024QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -96,7 +99,7 @@ def LLR_1024qam_bit_0_1(insym, noise_var,A):
     return LLR
 
 def LLR_1024qam_bit_2_3(insym, noise_var,A):
-    """ 1024QAM b2 and b3 LLR"""
+    """Calculate second-level LLRs for the I or Q axis of a 1024QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -164,7 +167,7 @@ def LLR_1024qam_bit_2_3(insym, noise_var,A):
     return LLR
 
 def LLR_1024qam_bit_4_5(insym, noise_var,A):
-    """ 1024QAM b4 and b5 LLR"""
+    """Calculate third-level LLRs for the I or Q axis of a 1024QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -228,7 +231,7 @@ def LLR_1024qam_bit_4_5(insym, noise_var,A):
     return LLR
 
 def LLR_1024qam_bit_6_7(insym, noise_var,A):
-    """ 1024QAM b6 and b7 LLR"""
+    """Calculate fourth-level LLRs for the I or Q axis of a 1024QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -284,7 +287,7 @@ def LLR_1024qam_bit_6_7(insym, noise_var,A):
     return LLR
 
 def LLR_1024qam_bit_8_9(insym, noise_var,A):
-    """ 1024QAM b8 and b9 LLR"""
+    """Calculate LSB LLRs for the I or Q axis of a 1024QAM symbol."""
     LLR = np.zeros(insym.size,dtype='f')
     for m in range(insym.size):
         r = insym[m]
@@ -322,8 +325,3 @@ def LLR_1024qam_bit_8_9(insym, noise_var,A):
             LLR[m] = 4*A*(-r+30*A)/noise_var[m]
     
     return LLR
-
-
-if __name__ == "__main__":
-    
-    aaa=1

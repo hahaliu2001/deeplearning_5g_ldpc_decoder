@@ -1,109 +1,114 @@
 # -*- coding:utf-8 -*-
-import numpy as np
+"""LDPC rate matching helpers from TS 38.212 section 5.4.2."""
+
 import math
 
-def get_Er_ldpc(G, C, Qm, NL):
-    """ get LDPC rate matching output sequence length for each coded block
-     following to 38.212 5.4.2
-     Er_list = get_Er_ldpc(G, C, Qm, NL)
-    input:
-        NL is the number of transmission layers that the transport block is mapped onto;
-        Qm is the modulation order;
-        G is the total number of coded bits available for transmission of the transport block;
-        C number of code block // do not support CBGTI here
-    output:
-        Er_list: rate matching output len for each coded block
-    """
-    Er_list = [0] * C #init
-    
-    j = 0
-    for r in range(C):
-        if j <= (C - ((G/(NL*Qm)) % C) - 1):
-             Er_list[j] = NL*Qm*math.floor(G/(NL*Qm*C))
-        else:
-             Er_list[j] = NL*Qm*math.ceil(G/(NL*Qm*C))
-        j += 1
+import numpy as np
 
-    return Er_list
+
+K0_FACTORS = {
+    # Numerators from TS 38.212 Table 5.4.2.1-2 for each redundancy version.
+    1: {0: 0, 1: 17, 2: 33, 3: 56},
+    2: {0: 0, 1: 13, 2: 25, 3: 43},
+}
+
+BG_DENOMINATORS = {
+    # Encoded LDPC lengths after puncturing are 66*Zc for BG1 and 50*Zc for BG2.
+    1: 66,
+    2: 50,
+}
+
+
+def get_Er_ldpc(G, C, Qm, NL):
+    """Return the rate-matched length for each LDPC code block.
+
+    Args:
+        G: Total number of coded bits available for the transport block.
+        C: Number of code blocks. CBGTI is not modeled here.
+        Qm: Modulation order.
+        NL: Number of transmission layers.
+
+    Returns:
+        List of length ``C`` containing each code block's rate-match length.
+    """
+    # Each Er must be a multiple of NL*Qm so the output maps cleanly onto
+    # modulation symbols and transmission layers.
+    bits_per_symbol_group = NL * Qm
+    base = bits_per_symbol_group * math.floor(G / (bits_per_symbol_group * C))
+    extra = bits_per_symbol_group * math.ceil(G / (bits_per_symbol_group * C))
+    num_base_blocks = C - ((G / bits_per_symbol_group) % C)
+
+    return [
+        base if block_idx <= num_base_blocks - 1 else extra
+        for block_idx in range(C)
+    ]
+
 
 def get_k0(Ncb, bgn, rv, Zc):
-    """ get LDPC rate match k0 value folowing to 38.212 5.4.2
-    k0 = get_k0(Ncb, bgn, rv, Zc)
-    input:
-        Ncb: circular buffer of length
-        bgn: LDPC base graph
-        rv: redundancy versions
-        Zc: minimum value of Z in all sets of lifting sizes in Table 5.3.2-1
-    output:
-        k0: Starting position
+    """Return the circular-buffer starting position ``k0``.
+
+    Args:
+        Ncb: Circular-buffer length.
+        bgn: LDPC base graph number, either 1 or 2.
+        rv: Redundancy version, one of 0, 1, 2, or 3.
+        Zc: LDPC lifting size.
+
+    Returns:
+        Starting position for bit selection.
     """
     assert rv in [0, 1, 2, 3]
     assert bgn in [1, 2]
 
-    if rv == 0:
-       k0 = 0
-    elif rv == 1:
-       if bgn == 1:
-           k0 = math.floor(17*Ncb/(66*Zc)) * Zc      
-       else:
-           k0 = math.floor(13*Ncb/(50*Zc)) * Zc
-    elif rv == 2:
-       if bgn == 1:
-           k0 = math.floor(33*Ncb/(66*Zc)) * Zc      
-       else:
-           k0 = math.floor(25*Ncb/(50*Zc)) * Zc
-    elif rv == 3:
-       if bgn == 1:
-           k0 = math.floor(56*Ncb/(66*Zc)) * Zc      
-       else:
-           k0 = math.floor(43*Ncb/(50*Zc)) * Zc
+    factor = K0_FACTORS[bgn][rv]
+    if factor == 0:
+        return 0
 
-    return k0
+    # k0 is quantized to a lifting-size boundary.
+    return math.floor(factor * Ncb / (BG_DENOMINATORS[bgn] * Zc)) * Zc
 
 
 def ratematch_ldpc(dn, Ncb, E, k0, Qm):
-    """ does one code block LDPC rate match by 38.212 5.4.2
-    the function include bit selection and bit interleaving.
-    the calculation of rate match related parameters(such as Nref, Er,k0..) is not in this function
-    fe = ratematch_ldpc(dn, Ncb, E, k0, Qm)::
-    input:
-        dn: N length input sequence
-        Ncb: circular buffer length
-        E: rate match output length
-        k0: starting position, refer to table 5.4.2.1-2
-        Qm: modulation order in range[1,2,4,6,8]
-    output:
-        fe: E length sequence
+    """Rate-match one LDPC code block.
+
+    The function performs the TS 38.212 bit-selection step followed by bit
+    interleaving. Parameter calculation such as ``Ncb``, ``E``, and ``k0`` is
+    intentionally kept outside this function.
+
+    Args:
+        dn: Encoded LDPC sequence. Filler bits are marked as ``-1``.
+        Ncb: Circular-buffer length.
+        E: Desired rate-matched output length.
+        k0: Circular-buffer starting position.
+        Qm: Modulation order.
+
+    Returns:
+        Length-``E`` rate-matched bit sequence.
     """
+    assert dn.size >= Ncb
+    assert E % Qm == 0
 
-    N = dn.size
-    assert N >= Ncb
-    ek = np.zeros(E)
-    #bit selection
-    k = 0
-    j = 0
-    while k < E:
-        if dn[(k0 + j) % Ncb] != -1: #not filler bit
-            ek[k] = dn[(k0 + j) % Ncb]
-            k += 1
-        j += 1
-    
-    #bit interleaving
-    d1 = ek.reshape(Qm, E // Qm)
-    d2=d1.T
-    fe = d2.reshape(1,E)[0]
-    fe = fe.astype('i1')
+    selected_bits = np.zeros(E, dtype="i1")
 
-    return fe
+    out_idx = 0
+    circ_idx = 0
+    while out_idx < E:
+        pos = (k0 + circ_idx) % Ncb
+        if dn[pos] != -1:
+            # Filler bits are skipped during circular-buffer selection.
+            selected_bits[out_idx] = dn[pos]
+            out_idx += 1
+        circ_idx += 1
+
+    # Interleave bits so adjacent modulation symbols receive the correct bit
+    # positions for the selected Qm.
+    return selected_bits.reshape(Qm, E // Qm).T.reshape(E).astype("i1")
+
 
 if __name__ == "__main__":
-    from scipy import io
-    import os
-    print("test LDPC rate match")
-    from tests.ldpc import test_ldpc_ratematch
-    file_lists = test_ldpc_ratematch.get_testvectors()
-    count = 1
-    for filename in file_lists:
-        print("count= {}, filename= {}".format(count, filename))
-        count += 1
-        test_ldpc_ratematch.test_nr_ldpc_ratematch(filename)
+    dn = np.array([0, 1, -1, 1, 0, 1, 0, -1], dtype="i1")
+    k0 = get_k0(Ncb=dn.size, bgn=1, rv=0, Zc=2)
+    fe = ratematch_ldpc(dn, Ncb=dn.size, E=6, k0=k0, Qm=2)
+
+    print("LDPC rate-match example")
+    print(f"  k0      : {k0}")
+    print(f"  output  : {fe.tolist()}")

@@ -18,6 +18,7 @@ SRCS = nr_crc.c \
 	   floatpoint_ldpc_decoder.c \
 	   c_ldpc_5g_decoder.c \
 	   c_ldpc_5g_encoder.c \
+	   tx_rx_process.c \
 	   ldpc_rate_match.c \
 	   ldpc_encoder.c \
 
@@ -46,6 +47,5 @@ $(ENCODE_EXE_NAME): test_ldpc_5g_encoder.c $(LIB_NAME)
 
 clean:
 	rm -f *.o $(LIB_NAME) $(EXE_NAME) $(ENCODE_EXE_NAME)
-	#rm -f *.o $(LIB_NAME) 
-
+	
 .PHONY: all debug clean

@@ -1,259 +1,163 @@
 # -*- coding:utf-8 -*-
+"""5G NR LDPC encoder from TS 38.212 section 5.3.2."""
+
+if __name__ == "__main__" and not __package__:
+    from pathlib import Path
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import numpy as np
-import scipy as sp
-import time
-import os
-import sys
-sys.path.append(os.getcwd()) 
 
 from py5gphy.ldpc import ldpc_info
 
+
+def _get_encoder_sizes(K, bgn):
+    """Return lifting size ``Zc`` and encoded length ``N`` for one code block."""
+    assert bgn in [1, 2]
+
+    if bgn == 1:
+        # Base graph 1 has K = 22*Zc information/filler positions and produces
+        # 66*Zc transmitted bits after LDPC encoding.
+        assert K % 22 == 0
+        Zc = K // 22
+        N = 66 * Zc
+    else:
+        # Base graph 2 has K = 10*Zc information/filler positions and produces
+        # 50*Zc transmitted bits after LDPC encoding.
+        assert K % 10 == 0
+        Zc = K // 10
+        N = 50 * Zc
+
+    return Zc, N
+
+
+def _prepare_systematic_bits(ck, Zc, N):
+    """Build the transmitted systematic part and replace filler bits for parity.
+
+    The first ``2*Zc`` information bits are punctured by TS 38.212, so they are
+    not copied into the transmitted sequence. Filler bits are represented as
+    ``-1`` in ``ck``; they are omitted from ``dn`` and replaced by zero for the
+    parity equations.
+    """
+    parity_input = ck.copy()
+    dn = -np.ones(N, dtype="i1")
+
+    for k in range(2 * Zc, ck.size):
+        if parity_input[k] == -1:
+            # Filler bits do not enter the transmitted sequence, but they are
+            # treated as zero while solving the parity equations.
+            parity_input[k] = 0
+        else:
+            # Shift by 2*Zc because the first two systematic columns are
+            # punctured and therefore absent from dn.
+            dn[k - 2 * Zc] = parity_input[k]
+
+    return dn, parity_input
+
+
+def _load_parity_check_matrix(Zc, bgn):
+    """Load the expanded LDPC parity-check matrix for ``Zc`` and base graph."""
+    # The lifting size determines which 38.212 lifting-size set is used.
+    iLS = ldpc_info.find_iLS(Zc)
+    assert iLS < 8
+    return ldpc_info.getH(Zc, bgn, iLS)
+
+
+def _insert_parity_bits(dn, parity_bits, K, Zc):
+    """Insert generated parity bits after the transmitted systematic region."""
+    # Parity bits are indexed as if the two punctured systematic columns were
+    # still present, so the same 2*Zc shift is used here.
+    for k in range(K, dn.size + 2 * Zc):
+        dn[k - 2 * Zc] = parity_bits[k - K]
+    return dn
+
+
 def encode_ldpc(ck, bgn):
-    """ LDPC encode following to TS38.212 5.3.2
-    dn = encode_ldpc(ck, bgn)
-    input: 
-        ck: K length code block
-        bgn: base graph value 1 or 2
-    output:
-        dn: N length LDPC encoded sequence
-    
+    """Encode one LDPC code block with the optimized parity-bit method.
+
+    Args:
+        ck: Length-``K`` LDPC encoder input block. Filler bits are marked as
+            ``-1``.
+        bgn: LDPC base graph number, either 1 or 2.
+
+    Returns:
+        Length-``N`` encoded sequence after puncturing the first ``2*Zc`` bits.
     """
-    assert bgn in [1,2]
     K = ck.size
+    # Derive all LDPC dimensions from the code-block length and base graph.
+    Zc, N = _get_encoder_sizes(K, bgn)
+
+    # Build the transmitted systematic region and the zero-filled vector used
+    # by the parity equations.
+    dn, parity_input = _prepare_systematic_bits(ck, Zc, N)
+
+    H = _load_parity_check_matrix(Zc, bgn)
+    parity_bits = _gen_ldpc_parity_bit(H, parity_input, Zc, K, N, bgn)
+    return _insert_parity_bits(dn, parity_bits, K, Zc)
+
+
+def _gen_ldpc_parity_bit(H, ck, Zc, K, N, bgn):
+    """Generate LDPC parity bits with the optimized 5G NR encoder structure."""
+    # This optimization follows "Flexible 5G New Radio LDPC Encoder Optimized
+    # for High Hardware Usage Efficiency" and docs/LDPC_encoder_optimization.pdf.
+    # A and B are the first four check-node block rows used to solve the first
+    # four parity sub-blocks; C generates the remaining parity sub-blocks.
+    A = H[0 : 4 * Zc, 0:K]
+    B = H[0 : 4 * Zc, K : K + 4 * Zc]
+    C = H[4 * Zc :, 0 : K + 4 * Zc]
+
+    # L1 is split into four Zc-length rows so the equations match the first
+    # four block rows of the lifted parity-check matrix.
+    L1 = (A @ ck.T).reshape((4, -1))
+    L2 = np.sum(L1, axis=0) % 2
+
     if bgn == 1:
-        Zc = K // 22
-        N = 66 * Zc
+        # BG1 and BG2 use different pivot rows when solving the first parity
+        # sub-block. After pc1 is known, pc2/pc3/pc4 follow from B.
+        zeros_idx = np.nonzero(B[Zc, 0:Zc])[0][0]
+        pc1 = np.roll(L2, zeros_idx)
+        pc2 = (L1[0, :] + B[0:Zc, 0:Zc] @ pc1.T) % 2
+        pc4 = (L1[3, :] + B[3 * Zc : 4 * Zc, 0:Zc] @ pc1.T) % 2
+        pc3 = (L1[2, :] + B[2 * Zc : 3 * Zc, 3 * Zc : 4 * Zc] @ pc4.T) % 2
     else:
-        Zc = K // 10
-        N = 50 * Zc
-    
-    #step 1: Find the set with index iLS in Table 5.3.2-1 which contains Zc
-    iLS = ldpc_info.find_iLS(Zc)
-    assert iLS < 8
+        # BG2 uses the third block row as the pivot for pc1 and derives pc3
+        # from pc2 instead of pc4.
+        zeros_idx = np.nonzero(B[2 * Zc, 0:Zc])[0][0]
+        pc1 = np.roll(L2, zeros_idx)
+        pc2 = (L1[0, :] + B[0:Zc, 0:Zc] @ pc1.T) % 2
+        pc4 = (L1[3, :] + B[3 * Zc : 4 * Zc, 0:Zc] @ pc1.T) % 2
+        pc3 = (L1[1, :] + B[Zc : 2 * Zc, Zc : 2 * Zc] @ pc2.T) % 2
 
-    #step 2: set dn[0:K-2*Zc]
-    dn = -np.ones(N,'i1')
-    for k in range(2*Zc,K):
-        if ck[k] == -1:
-            ck[k] = 0
-        else:
-            dn[k - 2*Zc] = ck[k]
-    
-    #step 3: generate wn
-    #start = time.time()
-    H = ldpc_info.getH(Zc, bgn, iLS)
-    #print("getH elpased time: {:6.2f}".format(time.time() - start))
+    first_parity = np.array([pc1, pc2, pc3, pc4]).reshape(-1)
+    extended_input = np.concatenate((ck, first_parity))
 
-    wn = _gen_ldpc_parity_bit(H, ck, Zc, K, N,bgn)
+    # Once the first four parity sub-blocks are known, the lower block rows
+    # generate the remaining parity bits with one matrix product.
+    remaining_parity = (C @ extended_input.T) % 2
+    return np.concatenate((first_parity, remaining_parity)).astype("i1")
 
-    #step 4
-    for k in range(K,N + 2*Zc):
-        dn[k - 2*Zc] = wn[k - K]
-
-    return dn
-
-def _gen_ldpc_parity_bit(H, ck, Zc, K, N,bgn):
-    """ generate LDPC paraty bit"""
-    choose_opt = 1
-
-    if choose_opt == 0:
-        #below code is not used. it does LDPC encoder without optimization
-        # for bgn1, 46ZcX66Zc H matrix can be split to 46ZcX22Zc H1 matrix and 46ZcX46Zc H2 matrix
-        # for bgn2, 42ZcX52Zc H matrix can be split to 42ZcX10Zc H1 matrix and 42ZcX42Zc H2 matrix
-        # the matrix H*[c w]' = 0 -> H1*c + H2*w = 0 -> H2*w = -H1*c -> w = H2_inverse *(-H1*c)
-
-        Hrowsize = H.shape[0]
-        Hcolsize = H.shape[1]
-        H1 = H[:,0:Hcolsize-Hrowsize]
-        H2 = H[:,Hcolsize-Hrowsize:Hcolsize]
-
-        #start = time.time()
-        L1 = -H1 @ ck.T  #matrix multiply
-        #print("H1 @ck.T elpased time: {:6.2f}".format(time.time() - start))
-
-        #start = time.time()
-        #this H2\L1 calcualtion takes very long of the elapsed time
-        #for Zc = 382m bgn=2, getH and -H1 @ ck.T operation each take around 0.20 second, 
-        # while below calculation takes 51.43 seconds
-        outd = np.linalg.solve(H2, L1) #outd = H2\L1;
-        #print("H1\L1 elpased time: {:6.2f}".format(time.time() - start))
-        ref_wn = np.round(outd) % 2
-        ref_wn = ref_wn.astype('i1')
-
-        #return wn
-    
-    #optimization based on 'Flexible 5G New Radio LDPC Encoder Optimized for High Hardware Usage Efficiency'
-    #https://www.mdpi.com/2079-9292/10/9/1106
-    #can also refer to docs/LDPC_encoder_optimization.pdf
-
-    #start = time.time() below code use at most 0.4second
-    #for optimized method
-    A = H[0:4*Zc, 0:K]
-    B = H[0:4*Zc, K:K+4*Zc]
-    C = H[4*Zc:, 0:K+4*Zc]
-
-    L1 = A @ ck.T
-    L1=L1.reshape((4,-1))
-    L2 = np.sum(L1,axis=0) % 2
-    if bgn == 1:
-        zeros_idx = np.nonzero(B[Zc,0:Zc])[0][0]
-        pc1 = np.roll(L2,zeros_idx)
-        pc2 = (L1[0,:] + B[0:Zc,0:Zc] @pc1.T) % 2
-        pc4 = (L1[3,:] + B[3*Zc:4*Zc,0:Zc] @pc1.T) % 2
-        pc3 = (L1[2,:] + B[2*Zc:3*Zc,3*Zc:4*Zc] @pc4.T) % 2
-    else:
-        zeros_idx = np.nonzero(B[2*Zc,0:Zc])[0][0]
-        pc1 = np.roll(L2,zeros_idx)
-        pc2 = (L1[0,:] + B[0:Zc,0:Zc] @pc1.T) % 2
-        pc4 = (L1[3,:] + B[3*Zc:4*Zc,0:Zc] @pc1.T) % 2
-        pc3 = (L1[1,:] + B[1*Zc:2*Zc,1*Zc:2*Zc] @pc2.T) % 2
-
-    pc = np.array([pc1,pc2,pc3,pc4]).reshape((-1,1))
-    pc = pc[:,0]
-
-    combined = np.concatenate((ck,pc))
-    pe = (C @ combined.T) % 2
-    wn = np.concatenate((pc,pe))
-    #print("encode_ldpc elpased time: {:6.2f}".format(time.time() - start))
-    return wn
-
-def encode_ldpc_raw(ck, bgn):
-    """ LDPC encode following to TS38.212 5.3.2
-    dn = encode_ldpc(ck, bgn)
-    input: 
-        ck: K length code block
-        bgn: base graph value 1 or 2
-    output:
-        dn: N length LDPC encoded sequence
-    
-    """
-    assert bgn in [1,2]
-    K = ck.size
-    if bgn == 1:
-        Zc = K // 22
-        N = 66 * Zc
-    else:
-        Zc = K // 10
-        N = 50 * Zc
-    
-    #step 1: Find the set with index iLS in Table 5.3.2-1 which contains Zc
-    iLS = ldpc_info.find_iLS(Zc)
-    assert iLS < 8
-
-    #step 2: set dn[0:K-2*Zc]
-    dn = -np.ones(N,'i1')
-    for k in range(2*Zc,K):
-        if ck[k] == -1:
-            ck[k] = 0
-        else:
-            dn[k - 2*Zc] = ck[k]
-    
-    #step 3: generate wn
-    #start = time.time()
-    H = ldpc_info.getH(Zc, bgn, iLS)
-    #print("getH elpased time: {:6.2f}".format(time.time() - start))
-
-    wn = _gen_ldpc_parity_bit_raw(H, ck, Zc, K, N,bgn)
-
-    #step 4
-    for k in range(K,N + 2*Zc):
-        dn[k - 2*Zc] = wn[k - K]
-
-    return dn
-
-def _gen_ldpc_parity_bit_raw(H, ck, Zc, K, N,bgn):
-    """ generate LDPC paraty bit"""
-    choose_opt = 0
-
-    if choose_opt == 0:
-        #below code is not used. it does LDPC encoder without optimization
-        # for bgn1, 46ZcX66Zc H matrix can be split to 46ZcX22Zc H1 matrix and 46ZcX46Zc H2 matrix
-        # for bgn2, 42ZcX52Zc H matrix can be split to 42ZcX10Zc H1 matrix and 42ZcX42Zc H2 matrix
-        # the matrix H*[c w]' = 0 -> H1*c + H2*w = 0 -> H2*w = -H1*c -> w = H2_inverse *(-H1*c)
-
-        Hrowsize = H.shape[0]
-        Hcolsize = H.shape[1]
-        H1 = H[:,0:Hcolsize-Hrowsize]
-        H2 = H[:,Hcolsize-Hrowsize:Hcolsize]
-
-        #start = time.time()
-        L1 = -H1 @ ck.T  #matrix multiply
-        #print("H1 @ck.T elpased time: {:6.2f}".format(time.time() - start))
-
-        #start = time.time()
-        #this H2\L1 calcualtion takes very long of the elapsed time
-        #for Zc = 382m bgn=2, getH and -H1 @ ck.T operation each take around 0.20 second, 
-        # while below calculation takes 51.43 seconds
-        outd = np.linalg.solve(H2, L1) #outd = H2\L1;
-        #print("H1\L1 elpased time: {:6.2f}".format(time.time() - start))
-        ref_wn = np.round(outd) % 2
-        ref_wn = ref_wn.astype('i1')
-
-        return ref_wn
-    
-    #optimization based on 'Flexible 5G New Radio LDPC Encoder Optimized for High Hardware Usage Efficiency'
-    #https://www.mdpi.com/2079-9292/10/9/1106
-    #can also refer to docs/LDPC_encoder_optimization.pdf
-
-    #start = time.time() below code use at most 0.4second
-    #for optimized method
-    A = H[0:4*Zc, 0:K]
-    B = H[0:4*Zc, K:K+4*Zc]
-    C = H[4*Zc:N+2*Zc, 0:K+4*Zc]
-
-    L1 = A @ ck.T
-    L1=L1.reshape((4,-1))
-    L2 = np.sum(L1,axis=0) % 2
-    if bgn == 1:
-        zeros_idx = np.nonzero(B[Zc,0:Zc])[0][0]
-        pc1 = np.roll(L2,zeros_idx)
-        pc2 = (L1[0,:] + B[0:Zc,0:Zc] @pc1.T) % 2
-        pc4 = (L1[3,:] + B[3*Zc:4*Zc,0:Zc] @pc1.T) % 2
-        pc3 = (L1[2,:] + B[2*Zc:3*Zc,3*Zc:4*Zc] @pc4.T) % 2
-    else:
-        zeros_idx = np.nonzero(B[2*Zc,0:Zc])[0][0]
-        pc1 = np.roll(L2,zeros_idx)
-        pc2 = (L1[0,:] + B[0:Zc,0:Zc] @pc1.T) % 2
-        pc4 = (L1[3,:] + B[3*Zc:4*Zc,0:Zc] @pc1.T) % 2
-        pc3 = (L1[1,:] + B[1*Zc:2*Zc,1*Zc:2*Zc] @pc2.T) % 2
-
-    pc = np.array([pc1,pc2,pc3,pc4]).reshape((-1,1))
-    pc = pc[:,0]
-
-    combined = np.concatenate((ck,pc))
-    pe = (C @ combined.T) % 2
-    wn = np.concatenate((pc,pe))
-    #print("encode_ldpc elpased time: {:6.2f}".format(time.time() - start))
-    return wn
 
 if __name__ == "__main__":
-    print("test LDPC encode")
-    """
-    from tests.ldpc import test_ldpc_encoder
-    file_lists = test_ldpc_encoder.get_testvectors()
-    count = 1
-    for filename in file_lists:
-        print("count= {}, filename= {}".format(count, filename))
-        count += 1
-        test_ldpc_encoder.test_nr_ldpc_encode(filename)
-    """
-    # test raw ldpc and optimized ldpc
-    Zlist = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, \
-            26, 28, 30, 32, 36, 40, 44, 48, 52, 56, 60, 64, 72, 80, 88, 96, 104, \
-            112, 120, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384]
-    for bgn in [1,2]:
-        Kb = 22 if bgn==1 else 10
-        for Zc in Zlist:
-            iLS = ldpc_info.find_iLS(Zc)
-            if iLS != 6:
-                continue
-            for n in range(20):
-                      
-                K = Kb*Zc
-                ck = np.random.randint(0, 2, K).astype(np.uint8)
-                wn_raw = encode_ldpc_raw(ck, bgn)
-                wn = encode_ldpc(ck, bgn)
-                print(f"bgn {bgn}, Zc={Zc}, iLS={iLS}, result = {np.array_equal(wn, wn_raw)}")
-                assert np.array_equal(wn, wn_raw)
-    
-    pass
+    rng = np.random.default_rng(0)
+
+    for bgn, Zc in [(1, 2), (2, 2)]:
+        K = (22 if bgn == 1 else 10) * Zc
+        _, N = _get_encoder_sizes(K, bgn)
+        ck = rng.integers(0, 2, size=K, dtype=np.int8)
+        dn, parity_input = _prepare_systematic_bits(ck, Zc, N)
+
+        print(f"BG{bgn} encoder setup example")
+        print(f"  K/Zc/N        : {K}/{Zc}/{N}")
+        print(f"  dn shape      : {dn.shape}")
+        print(f"  parity input  : {parity_input.shape}")
+
+        try:
+            encoded_bits = encode_ldpc(ck, bgn)
+        except ModuleNotFoundError as exc:
+            if exc.name != "scipy":
+                raise
+            print("  encode_ldpc   : skipped, scipy is required to load LDPC tables")
+        else:
+            print(f"  encode_ldpc   : {encoded_bits.shape}")
+            print(f"  first bits    : {encoded_bits[:min(12, encoded_bits.size)].tolist()}")

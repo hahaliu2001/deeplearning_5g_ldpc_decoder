@@ -1,14 +1,15 @@
 # -*- coding:utf-8 -*-
+"""QPSK soft demodulator."""
+
 import numpy as np
-import math
+from py5gphy.demodulation._common import hardbits_from_llr
 
 def demod(insymbols,noise_var):
-    """QPSK demodulation
-    """
-    
-    A = 1/math.sqrt(2)
+    """Demodulate QPSK symbols and return hard bits plus LLRs."""
+    A = 1 / np.sqrt(2)
     LLR = np.zeros(2*insymbols.size,dtype='f')
+    # QPSK carries one bit on I and one bit on Q for each complex symbol.
     LLR[0::2] = 4*insymbols.real*A/noise_var.real
     LLR[1::2] = 4*insymbols.imag*A/noise_var.real
-    hardbits = np.array([0 if a>0 else 1 for a in LLR])
+    hardbits = hardbits_from_llr(LLR)
     return hardbits,LLR

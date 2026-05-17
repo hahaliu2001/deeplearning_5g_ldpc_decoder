@@ -1,373 +1,359 @@
 # -*- coding:utf-8 -*-
+"""5G NR LDPC decoders from TS 38.212 section 5.3.2."""
+
+if __name__ == "__main__" and not __package__:
+    from pathlib import Path
+    import sys
+
+    # Allow direct IDE execution while keeping package imports unchanged.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import numpy as np
-import scipy as sp
-import time
 
-from py5gphy.ldpc import ldpc_info
-from py5gphy.ldpc import ldpc_decoder_bit_flipping
 from py5gphy.crc import crc
-from py5gphy.ldpc import nr_ldpc_encode
+from py5gphy.ldpc import ldpc_decoder_bit_flipping
+from py5gphy.ldpc import ldpc_info
 
-def nr_decode_ldpc(LLRin, Zc, bgn, crcpoly,B, ldpcdecoder_config={"L": 32,"algo": "min-sum","alpha": 0.8,"beta": 0}):
-    """ LDPC decode following to TS38.212 5.3.2
-    ck = encode_ldpc(dn, bgn)
-    input: 
-        LLRin: N length LDPC decoder LLR input data
-        bgn: base graph value 1 or 2
-        crcpoly: one of ['24A','24B','16']
-        B: payload size after CRC
-        algo: ["BF", "BP", "min-sum"]
-    output:
-        ck: K length LDPC decoded sequence
-    
-    """
-    L = ldpcdecoder_config["L"]
-    algo = ldpcdecoder_config["algo"]
-    alpha = ldpcdecoder_config["alpha"]
-    beta = ldpcdecoder_config["beta"]
 
-    assert bgn in [1,2]
-    assert algo in ['BF', 'BP', 'min-sum', 'layered-BP', 'layered-min-sum']
-    
+DEFAULT_DECODER_CONFIG = {
+    # L is the maximum iteration count. alpha/beta configure normalized and
+    # offset min-sum behavior when a min-sum algorithm is selected.
+    "L": 32,
+    "algo": "min-sum",
+    "alpha": 0.7,
+    "beta": 0,
+}
+
+SUPPORTED_ALGOS = ["BF", "BP", "min-sum", "layered-BP", "layered-min-sum"]
+
+
+def _decoder_config(user_config):
+    """Merge caller-provided decoder settings with the defaults."""
+    config = DEFAULT_DECODER_CONFIG.copy()
+    if user_config is not None:
+        config.update(user_config)
+    return config
+
+
+def _ldpc_dimensions(Zc, bgn):
+    """Return transmitted length ``N`` and encoder input length ``K``."""
+    assert bgn in [1, 2]
     if bgn == 1:
-        N = Zc * 66
-        K = Zc * 22
-    else:
-        N = Zc * 50
-        K = Zc * 10
-    
-    assert N == LLRin.size
-    
-    #step 1: Find the set with index iLS in Table 5.3.2-1 which contains Zc
+        # BG1 transmits 66*Zc bits after puncturing and has K = 22*Zc.
+        return 66 * Zc, 22 * Zc
+    # BG2 transmits 50*Zc bits after puncturing and has K = 10*Zc.
+    return 50 * Zc, 10 * Zc
+
+
+def _load_parity_check_matrix(Zc, bgn):
+    """Load the expanded parity-check matrix for the selected lifting size."""
+    # Zc determines the lifting-size set iLS used by the base-graph table.
     iLS = ldpc_info.find_iLS(Zc)
     assert iLS < 8
+    return ldpc_info.getH(Zc, bgn, iLS)
 
-    #step 2 : get H
-    H = ldpc_info.getH(Zc, bgn, iLS)
 
-    #add punctured 2*Zc information bits to get full ldpc decoder input
-    newLLRin = np.concatenate([np.zeros(2*Zc), LLRin])
+def _prepend_punctured_llr(LLRin, Zc):
+    """Restore the two punctured systematic columns with neutral LLR values."""
+    # The first two systematic column groups are not transmitted. A zero LLR is
+    # neutral, so the decoder can include these variables without bias.
+    return np.concatenate([np.zeros(2 * Zc), LLRin])
 
-    if algo in [ "BF"]:
-         blkWithoutCrc, status = ldpc_decoder_bit_flipping.ldpc_decoder_BF(newLLRin, H, crcpoly,B, L)
-    elif algo in ["BP", "min-sum"]:
-        blkWithoutCrc, status =  decode_ldpc(newLLRin, H, L, crcpoly,B,algo, alpha, beta)
-    elif algo in ["layered-BP", "layered-min-sum"]:
-        blkWithoutCrc, status =  layered_decode_ldpc(newLLRin, H, crcpoly,B,L, algo, alpha, beta)
-    
-    return blkWithoutCrc, status
 
-def decode_ldpc(LLRin, H, L, crcpoly, B, algo='min-sum', alpha=1, beta=0):
-    """ LDPC decoder, support BF(bit flipping), BP(belief propagation), min-sum algorithms
-    BP is also named sum-product algorithm
-    input: 
-        LLRin: N length LDPC decoder LLR input data
-        H: LDPC matrix, 
-        L: iteration size
-        crcpoly: crc type
-        B: payload size after CRC
-        algo: one of ["BF", "BP", "min-sum"]
-        alpha: (0:1] used for normalized min-sum. 1 means no normalized
-        beta: >=0 used for offset min-sum, 0 means no offset
-    output:
-        ck: N length LDPC decoded sequence
-        status: True or False
-    """     
-    
-    #for soft decision decoder
-    M = H.shape[0]
-    N = H.shape[1]
-    
-    #validate
-    assert LLRin.size == N
+def _check_to_var_indices(H):
+    """Return variable-node indices connected to each check node."""
+    return [list(np.where(H[row, :] == 1)[0]) for row in range(H.shape[0])]
 
-    #generate A list and B list
-    # A list contain sublist of all variable nodes index that connect to check node j
-    # correspondent to each line of H
-    #for examnple, A[0] is a list of variable nodes index that connect to check node 0
-    Alist=[]
-    for m in range(M):
-        idxlist = list(np.where(H[m,:] == 1)[0])
-        Alist.append(idxlist)
-    
-    # B list contain sublist of all check nodes index that connect to variable node i
-    # correspondent to each column of H
-    #for examnple, B[1] is a list of check nodes index that connect to variable node 1
-    Blist=[]
-    for n in range(N):
-        idxlist = list(np.where(H[:,n] == 1)[0])
-        Blist.append(idxlist)
-    
-    #init Lq, LQ, Lr
-    LQ = LLRin.copy() #decoded variable bits LLR
 
-    #Variable nodes to checking nodes LLR, Lq[m,n] = 0 if H[m,n]=0
-    #m is check node index, n is variable index, 
-    Lq = H*LLRin  
-    
-    #checking nodes to variable nodes, Lr[i,j] = 0 if H[i,j]=0
-    Lr = np.zeros((M,N)) 
-    
-    for iter in range(L):
-        #variable nodes to checking nodes update
-        for m in range(M):
-            sel_Lq = Lq[m,Alist[m]]
-            
-            if algo == 'BP':
-                Lr[m,Alist[m]] = _BP_process(sel_Lq, Alist[m])
-            else:
-                Lr[m,Alist[m]] = _min_sum_process(sel_Lq, Alist[m], alpha, beta)
-        
-        #update LQ
-        LQ = LLRin + Lr.sum(axis=0)
+def _var_to_check_indices(H):
+    """Return check-node indices connected to each variable node."""
+    return [list(np.where(H[:, col] == 1)[0]) for col in range(H.shape[1])]
 
-        #update Lq
-        for n in range(N):
-            for m in Blist[n]:
-                Lq[m,n] = LQ[n] - Lr[m,n]
 
-        ck = np.zeros(B,'i1') #hard coded bits
-        ck[LQ[0:B] < 0] = 1
-        blk,status = crc.nr_crc_decode(ck, crcpoly)
-        if status==0:
-            return blk, True
-    
-    return blk, False
+def _hard_bits_from_llr(LLR, size):
+    """Convert the first ``size`` LLRs to hard bits."""
+    bits = np.zeros(size, dtype="i1")
+    bits[LLR[0:size] < 0] = 1
+    return bits
 
-def layered_decode_ldpc(LLRin, H, crcpoly, B, L, algo='min-sum', alpha=1, beta=0):
-    """ LDPC decoder, support BP(belief propagation), min-sum algorithms
-    BP is also named sum-product algorithm
-    input: 
-        LLRin: N length LDPC decoder LLR input data
-        H: LDPC matrix, 
-        L: iteration size
-        algo: one of ["BF", "BP", "min-sum"]
-        alpha: (0:1] used for normalized min-sum. 1 means no normalized
-        beta: >=0 used for offset min-sum, 0 means no offset
-    output:
-        ck: N length LDPC decoded sequence
-        status: True or False
-    """     
-    
-    #for soft decision decoder
-    M = H.shape[0]
-    N = H.shape[1]
-    
-    #validate
-    assert LLRin.size == N
 
-    #generate A list and B list
-    # A list contain sublist of all variable nodes index that connect to check node j
-    # correspondent to each line of H
-    #for examnple, A[0] is a list of variable nodes index that connect to check node 0
-    Alist=[]
-    for m in range(M):
-        idxlist = list(np.where(H[m,:] == 1)[0])
-        Alist.append(idxlist)
-        
-    #init Lq, LQ, Lr
-    LQ = LLRin.copy() #decoded variable bits LLR
+def _crc_check_from_llr(LLR, B, crcpoly):
+    """Hard-decision the payload region and run CRC."""
+    # CRC is used as the early-stop criterion for all soft-decision decoders.
+    decoded_bits = _hard_bits_from_llr(LLR, B)
+    blk, status = crc.nr_crc_decode(decoded_bits, crcpoly)
+    return decoded_bits, blk, status == 0
 
-    #Variable nodes to checking nodes LLR, Lq[m,n] = 0 if H[m,n]=0
-    #m is check node index, n is variable index, 
-    Lq = np.zeros((M,N))   
-    
-    #checking nodes to variable nodes, Lr[i,j] = 0 if H[i,j]=0
-    Lr = np.zeros((M,N)) 
-    
-    for iter in range(L):        
-        #for each layer, where M is number of check nodes, which is also the number of layers in layered decoding
-        for m in range(M):
-            # A[m] is the list of variable node indices that connect to check node m
 
-            #generate layer m variable node -> check node LLR
-            sel_Lq = LQ[Alist[m]] - Lr[m,Alist[m]]
-            
-            #update Lr for layer m using min-sum processing
-            if algo == 'layered-min-sum':
-                Lr[m,Alist[m]] = _min_sum_process(sel_Lq, Alist[m], alpha, beta)
-            elif algo == 'layered-BP':
-                Lr[m,Alist[m]] = _BP_process(sel_Lq, Alist[m])
-            else:
-                assert False, "unsupported algorithm for layered decoding, should be one of 'layered-BP' and 'layered-min-sum'"
-        
-            #update LQ with index that connect to layer m
-            LQ[Alist[m]] = sel_Lq + Lr[m,Alist[m]]
-
-        #support CRC check after each iteration, if CRC check pass, return the decoded bits and status
-        ck = np.zeros(B,'i1') #hard coded bits
-        ck[LQ[0:B] < 0] = 1
-        blk,status = crc.nr_crc_decode(ck, crcpoly)
-        if status==0:
-            return blk, True
-    
-    return ck, False
-
-def _BP_process(sel_Lq, V_m):
-    #calculate Lr with BP processing
-    sel_Lr = np.zeros(sel_Lq.shape, dtype=np.float32)
-
-    zero_value_list = list(np.where(sel_Lq==0)[0])
-    
-    if len(zero_value_list) == 0:
-        #normal case, no zero value
-        tanh_Lq = np.tanh(sel_Lq/2)
-        #tanh_Lq[tanh_Lq==0] = 10**(-22)
-        prod_v = np.prod(tanh_Lq)
-        for idx, n in enumerate(V_m):
-            #tmp2 = np.prod(sel_Lq[0:idx]) * np.prod(sel_Lq[idx+1:])
-            tmp2 = prod_v/tanh_Lq[idx]
-            if tmp2 >= 1:
-                #print("Warning: tanh value is greater than or equal to 1, which may cause numerical issue for BP processing. Set Lr to maximum value")
-                sel_Lr[idx] = 2 * 19.07 #atanh(1) = infinite, set 19.07 as maximum value
-            elif tmp2 <= -1:
-                #print("Warning: tanh value is less than or equal to -1, which may cause numerical issue for BP processing. Set Lr to minimum value")
-                sel_Lr[idx] = -2 * 19.07 #atanh(-1) = negative infinite, set 19.07 as maximum value
-            else:
-                sel_Lr[idx] = 2 * np.arctanh(tmp2)
-    elif len(zero_value_list) == 1:
-        tanh_Lq = np.tanh(sel_Lq/2)
-        #only one zero value, only zero value related Lr is non-zero
-        zero_idx = zero_value_list[0]
-        
-        #np.prod(tanh_Lq[m:m) return 1, so we can directly calculate the product of all tanh_Lq without zero value and get the same result
-        sel_Lr[zero_idx] = np.prod(tanh_Lq[0:zero_idx]) * np.prod(tanh_Lq[zero_idx+1:])
-    else:
-        #>=2 zero values. all Lr are zero
-        pass    
-    
-    return sel_Lr
-
-def _min_sum_process(sel_Lq, V_m, alpha, beta):
-    """ mixed min-sim processing
-    alpha = 1, beta =0: min-sum
-    alpha < 1, beta = 0: normalized min-sum
-    alpha = 1, beta >0: offset min-sum
-    alpha <1, beta >0: mixed min-sum
-    """
-    sel_Lr = np.zeros(sel_Lq.shape, dtype=np.float32)
-    zero_value_list = list(np.where(sel_Lq==0)[0])
-    
-    if len(zero_value_list) == 0:
-        #normal case, no zero value
-        sign_prod = np.prod(np.sign(sel_Lq))
-        sorted_abs_v = np.sort(np.abs(sel_Lq))
-
-        first_min = sorted_abs_v[0]
-        second_min = sorted_abs_v[1]
-        for idx, n in enumerate(V_m):
-            if np.abs(sel_Lq[idx]) == first_min:
-                minv = second_min
-            else:
-                minv = first_min
-                
-            sel_minv = max(minv - beta, 0) #offset min-sum  
-            sel_Lr[idx] = alpha * sign_prod * np.sign(sel_Lq[idx]) * sel_minv
-    elif len(zero_value_list) == 1:
-        #only one zero value, only zero value related Lr is non-zero
-        
-        zero_idx = zero_value_list[0]
-        
-        if zero_idx == 0:
-            sign_prod = np.prod(np.sign(sel_Lq[1:]))
-            min_v = np.min(np.abs(sel_Lq[1:]))
-        elif zero_idx == sel_Lq.size-1: #last bit is zero
-            sign_prod = np.prod(np.sign(sel_Lq[0:zero_idx]))
-            min_v = np.min(np.abs(sel_Lq[0:zero_idx]))
-        else:
-            sign_prod = np.prod(np.sign(sel_Lq[0:zero_idx]))*np.prod(np.sign(sel_Lq[zero_idx+1:]))
-            min_v = min(np.min(np.abs(sel_Lq[0:zero_idx])),np.min(np.abs(sel_Lq[zero_idx+1:])))
-        
-        sel_minv = max(min_v - beta, 0) #offset min-sum  
-        sel_Lr[zero_idx] = alpha * sign_prod *sel_minv 
-    else:
-        #>=2 zero values. all Lr are zero
-        pass
-    
-    return sel_Lr
-
-def for_test_5g_ldpc_encoder(Zc, bgn, snr_db,crcpoly='24A'):
-    """ generate 5G LLRin for LDPC decoder test using BPSK modulation
-    """
-    assert bgn in [1, 2]
-    assert crcpoly in ['24A', '24B', '16']
-    if bgn == 1:
-        K = Zc * 22
-        N = Zc * 66
-    else:
-        K = Zc * 10
-        N = Zc * 50
-
-    if crcpoly in ['24A', '24B']:
-        crc_len = 24
-    else:
-        crc_len = 16
-
-    #generate input bit
-    inbits = np.random.randint(2, size = K-crc_len)
-    blkandcrc = crc.nr_crc_encode(inbits, crcpoly)
-    dn = nr_ldpc_encode.encode_ldpc(blkandcrc, bgn)      
-
-    #LLR generation
-    en = 1 - 2*dn #BPSK modulation, 0 -> 1, 1 -> -1
-    fn = en + np.random.normal(0, 10**(-snr_db/20), dn.size) #add noise
-    
-    #LLR is log(P(0)/P(1)) = (-(x-1)^2+(x+1)^2)/(2*noise_power) = 4x/(2*noise_power) = 2x/noise_power
-    noise_power = 10**(-snr_db/10)
-    LLRin = 2*fn/noise_power
-    
-
-    return blkandcrc, dn, LLRin
-
-def _do_parity_check(LQ, H):
-    """_summary_ This function is used for parity check in LDPC decoding, 
-        which can be used for early stopping. 
-        But we use CRC check for early stopping in our implementation, so this function is not used in the current code.
+def nr_decode_ldpc(LLRin, Zc, bgn, crcpoly, B, ldpcdecoder_config=None):
+    """Decode one transmitted LDPC code block.
 
     Args:
-        LQ (_type_): _description_
-        H (_type_): _description_
+        LLRin: Length-``N`` received LLR sequence. It excludes the first
+            ``2*Zc`` punctured systematic positions.
+        Zc: LDPC lifting size.
+        bgn: LDPC base graph number, either 1 or 2.
+        crcpoly: CRC polynomial name accepted by ``crc.nr_crc_decode``.
+        B: Number of decoded bits to check with CRC.
+        ldpcdecoder_config: Optional dict with ``L``, ``algo``, ``alpha``, and
+            ``beta`` entries.
 
     Returns:
-        _type_: _description_
+        decoded_bits: CRC-stripped payload when CRC passes; otherwise hard
+            decisions from the last iteration.
+        status: ``True`` when decoding succeeds.
     """
-    N = LQ.size
-    #hard decision
-    ck = np.zeros(N,'i1') #hard coded bits
-    ck[LQ >= 0] = 0
-    ck[LQ < 0] = 1
-    
-    if not np.any(ck): 
-        #if all variables bits are 0, decoding failed, return False
-        return ck, False
-    
-    #parity check first
-    S = (H @ ck.T) % 2    
-    if not np.any(S): 
-        #if S is all zero sequence, decoding success, return Tue
-        return ck, True
-    else:
-        return ck, False
+    config = _decoder_config(ldpcdecoder_config)
+    L = config["L"]
+    algo = config["algo"]
+    alpha = config["alpha"]
+    beta = config["beta"]
+
+    assert algo in SUPPORTED_ALGOS
+
+    N, _ = _ldpc_dimensions(Zc, bgn)
+    assert N == LLRin.size
+
+    H = _load_parity_check_matrix(Zc, bgn)
+    full_llr = _prepend_punctured_llr(LLRin, Zc)
+
+    # Dispatch to the requested schedule/algorithm while sharing the same full
+    # LLR vector and parity-check matrix.
+    if algo == "BF":
+        return ldpc_decoder_bit_flipping.ldpc_decoder_BF(full_llr, H, crcpoly, B, L)
+
+    if algo in ["BP", "min-sum"]:
+        return decode_ldpc(full_llr, H, L, crcpoly, B, algo, alpha, beta)
+
+    return layered_decode_ldpc(full_llr, H, crcpoly, B, L, algo, alpha, beta)
+
+
+def decode_ldpc(LLRin, H, L, crcpoly, B, algo="min-sum", alpha=1, beta=0):
+    """Decode with flooding-schedule BP or min-sum.
+
+    Args:
+        LLRin: Full decoder input LLR sequence, including neutral LLRs for the
+            two punctured systematic columns.
+        H: Expanded LDPC parity-check matrix.
+        L: Maximum iteration count.
+        crcpoly: CRC polynomial name.
+        B: Number of decoded bits to check with CRC.
+        algo: ``"BP"`` or ``"min-sum"``.
+        alpha: Normalized min-sum scaling factor.
+        beta: Offset min-sum subtraction value.
+
+    Returns:
+        decoded_bits: CRC-stripped payload when CRC passes; otherwise hard
+            decisions from the final iteration.
+        status: ``True`` when CRC passes.
+    """
+    num_checks, num_vars = H.shape
+    assert LLRin.size == num_vars
+    assert algo in ["BP", "min-sum"]
+
+    check_to_vars = _check_to_var_indices(H)
+    var_to_checks = _var_to_check_indices(H)
+
+    # LQ holds posterior variable-node LLRs. Lq is variable-to-check messages,
+    # and Lr is check-to-variable messages.
+    LQ = LLRin.copy()
+    Lq = H * LLRin
+    Lr = np.zeros((num_checks, num_vars))
+    decoded_bits = _hard_bits_from_llr(LQ, B)
+
+    for _ in range(L):
+        # Check-node update: compute each outgoing message from all incoming
+        # variable-node messages connected to the same check node.
+        for check_idx, var_indices in enumerate(check_to_vars):
+            sel_Lq = Lq[check_idx, var_indices]
+            if algo == "BP":
+                Lr[check_idx, var_indices] = _BP_process(sel_Lq, var_indices)
+            else:
+                Lr[check_idx, var_indices] = _min_sum_process(
+                    sel_Lq, var_indices, alpha, beta
+                )
+
+        # Variable-node posterior LLRs are the channel LLR plus all incoming
+        # check-node messages.
+        LQ = LLRin + Lr.sum(axis=0)
+
+        # Refresh variable-to-check messages by removing the destination
+        # check-node contribution from the posterior LLR.
+        for var_idx, check_indices in enumerate(var_to_checks):
+            for check_idx in check_indices:
+                Lq[check_idx, var_idx] = LQ[var_idx] - Lr[check_idx, var_idx]
+
+        decoded_bits, blk, crc_ok = _crc_check_from_llr(LQ, B, crcpoly)
+        if crc_ok:
+            return blk, True
+
+    # If CRC never passes, return the last hard decision for the requested
+    # decoded region.
+    return decoded_bits, False
+
+
+def layered_decode_ldpc(LLRin, H, crcpoly, B, L, algo="min-sum", alpha=1, beta=0):
+    """Decode with layered BP or layered min-sum.
+
+    Layered decoding updates the posterior LLRs immediately after each check
+    node, which often converges faster than the flooding schedule.
+    """
+    num_checks, num_vars = H.shape
+    assert LLRin.size == num_vars
+    assert algo in ["layered-BP", "layered-min-sum"]
+
+    check_to_vars = _check_to_var_indices(H)
+
+    # Layered decoding keeps only LQ and Lr. Each layer reconstructs its
+    # variable-to-check messages from the current posterior LLRs.
+    LQ = LLRin.copy()
+    Lr = np.zeros((num_checks, num_vars))
+    decoded_bits = _hard_bits_from_llr(LQ, B)
+
+    for _ in range(L):
+        for check_idx, var_indices in enumerate(check_to_vars):
+            # Remove the old check-node message to recover the extrinsic input
+            # for this layer, then write the new message back immediately.
+            sel_Lq = LQ[var_indices] - Lr[check_idx, var_indices]
+
+            if algo == "layered-min-sum":
+                Lr[check_idx, var_indices] = _min_sum_process(
+                    sel_Lq, var_indices, alpha, beta
+                )
+            else:
+                Lr[check_idx, var_indices] = _BP_process(sel_Lq, var_indices)
+
+            LQ[var_indices] = sel_Lq + Lr[check_idx, var_indices]
+
+        decoded_bits, blk, crc_ok = _crc_check_from_llr(LQ, B, crcpoly)
+        if crc_ok:
+            return blk, True
+
+    # If CRC never passes, return the last hard decision for the requested
+    # decoded region.
+    return decoded_bits, False
+
+
+def _BP_process(sel_Lq, V_m):
+    """Calculate check-node outgoing messages with BP/sum-product."""
+    sel_Lr = np.zeros(sel_Lq.shape, dtype=np.float32)
+    zero_indices = list(np.where(sel_Lq == 0)[0])
+
+    if len(zero_indices) == 0:
+        # Standard BP check-node rule: product of tanh(incoming/2), excluding
+        # the destination edge. Clamp atanh inputs at +/-1 to avoid infinities.
+        tanh_Lq = np.tanh(sel_Lq / 2)
+        tanh_prod = np.prod(tanh_Lq)
+
+        for idx, _ in enumerate(V_m):
+            extrinsic_prod = tanh_prod / tanh_Lq[idx]
+            if extrinsic_prod >= 1:
+                sel_Lr[idx] = 2 * 19.07
+            elif extrinsic_prod <= -1:
+                sel_Lr[idx] = -2 * 19.07
+            else:
+                sel_Lr[idx] = 2 * np.arctanh(extrinsic_prod)
+    elif len(zero_indices) == 1:
+        # With one zero input, every non-zero edge sees an extrinsic product
+        # containing that zero. Only the zero edge can receive a non-zero value.
+        tanh_Lq = np.tanh(sel_Lq / 2)
+        zero_idx = zero_indices[0]
+        # Preserve the existing zero-input behavior: only the zero edge can
+        # receive a non-zero message.
+        sel_Lr[zero_idx] = np.prod(tanh_Lq[0:zero_idx]) * np.prod(
+            tanh_Lq[zero_idx + 1 :]
+        )
+
+    return sel_Lr
+
+
+def _min_sum_process(sel_Lq, V_m, alpha, beta):
+    """Calculate check-node outgoing messages with mixed min-sum.
+
+    ``alpha=1, beta=0`` gives plain min-sum. Reducing ``alpha`` gives normalized
+    min-sum, and increasing ``beta`` gives offset min-sum.
+    """
+    sel_Lr = np.zeros(sel_Lq.shape, dtype=np.float32)
+    zero_indices = list(np.where(sel_Lq == 0)[0])
+
+    if len(zero_indices) == 0:
+        # Standard min-sum needs the global sign and the smallest two absolute
+        # values. The edge holding the minimum uses the second minimum.
+        sign_prod = np.prod(np.sign(sel_Lq))
+        sorted_abs = np.sort(np.abs(sel_Lq))
+        first_min = sorted_abs[0]
+        second_min = sorted_abs[1]
+
+        for idx, _ in enumerate(V_m):
+            min_value = second_min if np.abs(sel_Lq[idx]) == first_min else first_min
+            min_value = max(min_value - beta, 0)
+            sel_Lr[idx] = alpha * sign_prod * np.sign(sel_Lq[idx]) * min_value
+    elif len(zero_indices) == 1:
+        # With one zero input, only that edge can receive a non-zero message.
+        # Its sign and magnitude come from all non-zero neighboring edges.
+        zero_idx = zero_indices[0]
+
+        if zero_idx == 0:
+            sign_prod = np.prod(np.sign(sel_Lq[1:]))
+            min_value = np.min(np.abs(sel_Lq[1:]))
+        elif zero_idx == sel_Lq.size - 1:
+            sign_prod = np.prod(np.sign(sel_Lq[0:zero_idx]))
+            min_value = np.min(np.abs(sel_Lq[0:zero_idx]))
+        else:
+            sign_prod = np.prod(np.sign(sel_Lq[0:zero_idx])) * np.prod(
+                np.sign(sel_Lq[zero_idx + 1 :])
+            )
+            min_value = min(
+                np.min(np.abs(sel_Lq[0:zero_idx])),
+                np.min(np.abs(sel_Lq[zero_idx + 1 :])),
+            )
+
+        min_value = max(min_value - beta, 0)
+        sel_Lr[zero_idx] = alpha * sign_prod * min_value
+
+    return sel_Lr
 
 if __name__ == "__main__":
-    from scipy import io
-    import os
-    from py5gphy.crc import crc
-    from py5gphy.ldpc import nr_ldpc_encode
-    
-    print("test LDPC soft decision decoder")
-    from tests.ldpc import test_ldpc_decoder_soft
-    file_lists = test_ldpc_decoder_soft.get_testvectors()
-    count = 1
-    for filename in file_lists:
-        print("count= {}, filename= {}".format(count, filename))
-        count += 1
-        test_ldpc_decoder_soft.test_nr_ldpc_decode_BP(filename)
-        test_ldpc_decoder_soft.test_nr_ldpc_decode_min_sum(filename)
-        test_ldpc_decoder_soft.test_nr_ldpc_decode_NMS(filename)
-        test_ldpc_decoder_soft.test_nr_ldpc_decode_OMS(filename)
-        test_ldpc_decoder_soft.test_nr_ldpc_decode_mixed_min_sum(filename)
+    print("LDPC decoder helper examples")
 
+    sel_Lq = np.array([1.5, -0.7, 2.1, -3.0], dtype=np.float32)
+    print("  BP messages      :", np.round(_BP_process(sel_Lq, range(sel_Lq.size)), 3))
+    print(
+        "  min-sum messages :",
+        np.round(_min_sum_process(sel_Lq, range(sel_Lq.size), 0.8, 0), 3),
+    )
 
+    try:
+        _load_parity_check_matrix(2, 1)
+    except ModuleNotFoundError as exc:
+        if exc.name != "scipy":
+            raise
+        print("  full decoder     : skipped, scipy is required to load LDPC tables")
+    else:
+        print("  full decoder     : LDPC table loading is available")
 
-    pass
+    # Minimal decoder smoke test with a tiny parity-check matrix. The all-zero
+    # payload plus CRC6 is a valid CRC word, so this exercises the decoder loops
+    # without requiring a full generated 5G LDPC matrix.
+    H = np.array(
+        [
+            [1, 1, 0, 0, 0, 0, 1, 0, 0, 0],
+            [0, 1, 1, 0, 0, 0, 0, 1, 0, 0],
+            [0, 0, 1, 1, 0, 0, 0, 0, 1, 0],
+            [0, 0, 0, 1, 1, 0, 0, 0, 0, 1],
+        ],
+        dtype="i1",
+    )
+    LLRin = 4.0 * np.ones(10, dtype=np.float32)
+
+    for algo in ["min-sum", "layered-min-sum"]:
+        if algo == "min-sum":
+            decoded_bits, status = decode_ldpc(
+                LLRin, H, L=3, crcpoly="6", B=10, algo=algo, alpha=1, beta=0
+            )
+        else:
+            decoded_bits, status = layered_decode_ldpc(
+                LLRin, H, crcpoly="6", B=10, L=3, algo=algo, alpha=1, beta=0
+            )
+
+        print(f"  {algo:15s}: status={status}, bits={decoded_bits.tolist()}")

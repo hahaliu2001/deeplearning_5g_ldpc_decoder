@@ -1,150 +1,216 @@
 # -*- coding:utf-8 -*-
+"""5G NR modulation mapper helpers from TS 38.211 section 5.1."""
+
 import numpy as np
-import math
+
+
+MODULATION_ORDER = {
+    "pi/2-bpsk": 1,
+    "bpsk": 1,
+    "qpsk": 2,
+    "16qam": 4,
+    "64qam": 6,
+    "256qam": 8,
+    "1024qam": 10,
+}
+
+QAM_NORMALIZATION = {
+    4: np.sqrt(10.0),
+    6: np.sqrt(42.0),
+    8: np.sqrt(170.0),
+    # 1024QAM has 32 amplitude levels per axis: +/-1, +/-3, ..., +/-31.
+    10: np.sqrt(682.0),
+}
+
+
+def _normalize_modtype(modtype):
+    """Return a canonical lower-case modulation name."""
+    modtype = str(modtype).lower()
+    assert modtype in MODULATION_ORDER, "modulation type is incorrect"
+    return modtype
+
+
+def _as_float_bits(inbits):
+    """Return input bits as a flat float array."""
+    bits = np.asarray(inbits).reshape(-1)
+    assert np.all((bits == 0) | (bits == 1)), "input bits must be 0 or 1"
+    return bits.astype("f")
+
+
+def _check_length(bits, Qm):
+    """Ensure the input bit length contains complete modulation symbols."""
+    assert bits.size % Qm == 0, f"length of databits must be multiple of {Qm}"
+
+
+def _bit_sign(bits):
+    """Map bit 0 to +1 and bit 1 to -1."""
+    return 1.0 - 2.0 * bits
+
+
+def _qam_axis(bits, offset, Qm):
+    """Return I or Q amplitudes for the selected QAM axis."""
+    axis_signs = [_bit_sign(bits[offset + 2 * idx :: Qm]) for idx in range(Qm // 2)]
+
+    if Qm == 4:
+        return axis_signs[0] * (2.0 - axis_signs[1])
+    if Qm == 6:
+        return axis_signs[0] * (4.0 - axis_signs[1] * (2.0 - axis_signs[2]))
+    if Qm == 8:
+        return axis_signs[0] * (
+            8.0 - axis_signs[1] * (4.0 - axis_signs[2] * (2.0 - axis_signs[3]))
+        )
+
+    if Qm == 10:
+        # 1024QAM extends the same Gray-coded recursive amplitude rule used by
+        # the lower-order QAM mappings.
+        return axis_signs[0] * (
+            16.0 - axis_signs[1] * (
+                8.0 - axis_signs[2] * (
+                    4.0 - axis_signs[3] * (2.0 - axis_signs[4])
+                )
+            )
+        )
+
+    raise ValueError(f"unsupported QAM order: {Qm}")
+
 
 def nrModulate(inbits, modtype):
-    """modulation refer to 38.211 5.1 Modulation mapper
-    mod_data = nrModulate(inbits, modtype)
-    """
-    modtype = modtype.lower()
-    assert modtype in ["pi/2-bpsk", "bpsk", "qpsk", "16qam", "64qam", "256qam", "1024qam"], "modulation type is incorrect"
+    """Map input bits to complex 5G NR modulation symbols.
 
-    b = inbits.astype('f') #convert to float32
-    N = b.size
-    
+    Args:
+        inbits: One-dimensional array of 0/1 bits.
+        modtype: One of "pi/2-bpsk", "bpsk", "qpsk", "16qam", "64qam",
+            "256qam", or "1024qam".
+
+    Returns:
+        Complex64 NumPy array containing modulation symbols.
+    """
+    modtype = _normalize_modtype(modtype)
+    bits = _as_float_bits(inbits)
+    Qm = MODULATION_ORDER[modtype]
+
     if modtype == "bpsk":
-        mod_data = ((1-2*b) + 1j*(1-2*b))/math.sqrt(2)         
-    elif modtype == "pi/2-bpsk":
-        d1 = ((1-2*b) + 1j*(1-2*b))/math.sqrt(2)
-        d2 = ((2*b-1) + 1j*(1-2*b))/math.sqrt(2)
-        mod_data = d1
-        mod_data[1::2] = d2[1::2]        
-    elif modtype == "qpsk":
-        assert N % 2 == 0, "length of databits must be multiple of 2"
-        mod_data = ((1-2*b[0::2]) + 1j*(1-2*b[1::2]))/math.sqrt(2)        
-    elif modtype == "16qam":
-        assert N % 4 == 0, "length of databits must be multiple of 4"
-        mod_data = ((1-2*b[0::4]) * (2 - (1-2*b[2::4])) 
-               + 1j*(1-2*b[1::4]) * (2 - (1-2*b[3::4]))
-                    )/math.sqrt(10)                
-    elif modtype == "64qam":
-        assert N % 6 == 0, "length of databits must be multiple of 6"
-        mod_data = ((1-2*b[0::6]) * (4 - (1-2*b[2::6])*(2-(1-2*b[4::6]))) 
-               + 1j*(1-2*b[1::6]) * (4 - (1-2*b[3::6])*(2-(1-2*b[5::6])))
-                    )/math.sqrt(42)        
-    elif modtype == "256qam":
-        assert N % 8 == 0, "length of databits must be multiple of 8"
-        mod_data = ((1-2*b[0::8]) * (8 - (1-2*b[2::8])*(4 - (1-2*b[4::8])*(2-(1-2*b[6::8]))))
-               + 1j*(1-2*b[1::8]) * (8 - (1-2*b[3::8])*(4 - (1-2*b[5::8])*(2-(1-2*b[7::8]))))
-                    )/math.sqrt(170)
-    elif modtype == "1024qam":
-        assert N % 10 == 0, "length of databits must be multiple of 10"
-        mod_data = ((1-2*b[0::10]) * (16 - (1-2*b[2::10])*(8 - (1-2*b[4::10])*(4 - (1-2*b[6::10])*(2-(1-2*b[8::10])))))
-               + 1j*(1-2*b[1::10]) * (16 - (1-2*b[3::10])*(8 - (1-2*b[5::10])*(4 - (1-2*b[7::10])*(2-(1-2*b[9::10])))))
-                    )/math.sqrt(682)
-    return mod_data
+        sign = _bit_sign(bits)
+        return ((sign + 1j * sign) / np.sqrt(2.0)).astype("c8")
+
+    if modtype == "pi/2-bpsk":
+        sign = _bit_sign(bits)
+        mod_data = ((sign + 1j * sign) / np.sqrt(2.0)).astype("c8")
+        mod_data[1::2] = (((-sign[1::2]) + 1j * sign[1::2]) / np.sqrt(2.0)).astype("c8")
+        return mod_data
+
+    _check_length(bits, Qm)
+
+    if modtype == "qpsk":
+        i_axis = _bit_sign(bits[0::2])
+        q_axis = _bit_sign(bits[1::2])
+        return ((i_axis + 1j * q_axis) / np.sqrt(2.0)).astype("c8")
+
+    if modtype == "1024qam":
+        i_axis = _qam_axis(bits, 0, Qm)
+        q_axis = _qam_axis(bits, 1, Qm)
+        return ((i_axis + 1j * q_axis) / QAM_NORMALIZATION[Qm]).astype("c8")
+
+    i_axis = _qam_axis(bits, 0, Qm)
+    q_axis = _qam_axis(bits, 1, Qm)
+    return ((i_axis + 1j * q_axis) / QAM_NORMALIZATION[Qm]).astype("c8")
+
 
 def get_mod_list(modtype):
-    """return all modulation and bit sequence for given modtype
-    """
-    #get all modulation values for modtype
-    Qm_list = {"pi/2-bpsk":1, "bpsk":1, "qpsk":2, "16qam":4, "64qam":6, "256qam":8, "1024qam":10}
-    Qm = Qm_list[modtype]
-    mod_array = np.zeros(2**Qm, 'c8')
-    inbits_array = np.zeros((2**Qm,Qm),'i8')
-    for m in range(2**Qm):
-        if Qm == 1:
-            inbits = [int(x) for x in list('{0:01b}'.format(m))]
-        elif Qm == 2:
-            inbits = [int(x) for x in list('{0:02b}'.format(m))]
-        elif Qm == 4:
-            inbits = [int(x) for x in list('{0:04b}'.format(m))]
-        elif Qm == 6:
-            inbits = [int(x) for x in list('{0:06b}'.format(m))]
-        elif Qm == 8:
-            inbits = [int(x) for x in list('{0:08b}'.format(m))]
-        elif Qm == 10:
-            inbits = [int(x) for x in list('{0:010b}'.format(m))]
-        else:
-            inbits = 0
-        inbits_array[m,:] = np.array(inbits)
-        mod_data = nrModulate(np.array(inbits), modtype)
-        mod_array[m] = mod_data
-    
-    return mod_array,inbits_array
+    """Return every constellation symbol and its associated bit pattern."""
+    modtype = _normalize_modtype(modtype)
+    Qm = MODULATION_ORDER[modtype]
+    num_symbols = 2 ** Qm
 
-def get_oppisite_syms(inbits,modtype):
-    #find Symbo list with opposite bit value for each bit,
-    # for example, QAM16 symbol A with bits "1111" 
-    #the symbol with first bit=0 and closest to symbol A is symbol with bits 101
-    #the symbol with second bit=0 and closest to symbol A is symbol with its 1010
-    #the symbol with third bit=0 and closest to symbol A is symbol with bits 101
-    #the symbol with forth bit=0 and closest to symbol A is symbol with bits 110
-    #the slection is related to QAM constellation
-#["pi/2-bpsk", "bpsk", "qpsk", "16qam", "64qam", "256qam", "1024qam"]
-    if modtype == "pi/2-bpsk":
-        opposite_syms = nrModulate(1-inbits, modtype)
-    elif modtype == "bpsk":
-        opposite_syms = nrModulate(1-inbits, modtype)
-    elif modtype == "qpsk":
-        newbits = np.array([1-inbits[0],inbits[1],inbits[0],1-inbits[1]])
-        opposite_syms = nrModulate(newbits, modtype)
+    mod_array = np.zeros(num_symbols, dtype="c8")
+    inbits_array = np.zeros((num_symbols, Qm), dtype="i8")
+
+    for symbol_idx in range(num_symbols):
+        inbits = np.array(
+            [int(bit) for bit in f"{symbol_idx:0{Qm}b}"],
+            dtype="i8",
+        )
+        inbits_array[symbol_idx, :] = inbits
+        mod_array[symbol_idx] = nrModulate(inbits, modtype)[0]
+
+    return mod_array, inbits_array
+
+
+def get_opposite_syms(inbits, modtype):
+    """Return nearest symbols with each bit flipped in turn.
+
+    The returned array has one symbol per input bit. For QAM, lower-significance
+    bits are moved to the nearest point with the opposite bit value, matching the
+    original helper used by the demodulator derivations.
+    """
+    modtype = _normalize_modtype(modtype)
+    inbits = np.asarray(inbits, dtype="i8").reshape(-1)
+
+    if modtype in ["pi/2-bpsk", "bpsk"]:
+        return nrModulate(1 - inbits, modtype)
+
+    if modtype == "qpsk":
+        replacement_bits = np.array([
+            1 - inbits[0], inbits[1],
+            inbits[0], 1 - inbits[1],
+        ])
     elif modtype == "16qam":
-        newbits = np.array([
-            1-inbits[0],inbits[1],0,inbits[3],
-            inbits[0],1-inbits[1],inbits[2],0,
-            inbits[0],inbits[1],1-inbits[2],inbits[3],
-            inbits[0],inbits[1],inbits[2],1-inbits[3]
-            ])
-        opposite_syms = nrModulate(newbits, modtype)
+        replacement_bits = np.array([
+            1 - inbits[0], inbits[1], 0, inbits[3],
+            inbits[0], 1 - inbits[1], inbits[2], 0,
+            inbits[0], inbits[1], 1 - inbits[2], inbits[3],
+            inbits[0], inbits[1], inbits[2], 1 - inbits[3],
+        ])
     elif modtype == "64qam":
-        newbits = np.array([
-            1-inbits[0],inbits[1],0,inbits[3],1,inbits[5],
-            inbits[0], 1-inbits[1],inbits[2],0, inbits[4],1,
-            inbits[0],inbits[1],1-inbits[2],inbits[3],0,inbits[5],
-            inbits[0], inbits[1],inbits[2],1-inbits[3], inbits[4],0,
-            inbits[0],inbits[1],inbits[2],inbits[3],1-inbits[4],inbits[5],
-            inbits[0], inbits[1],inbits[2],inbits[3], inbits[4],1-inbits[5]
-            ])
-        opposite_syms = nrModulate(newbits, modtype)
+        replacement_bits = np.array([
+            1 - inbits[0], inbits[1], 0, inbits[3], 1, inbits[5],
+            inbits[0], 1 - inbits[1], inbits[2], 0, inbits[4], 1,
+            inbits[0], inbits[1], 1 - inbits[2], inbits[3], 0, inbits[5],
+            inbits[0], inbits[1], inbits[2], 1 - inbits[3], inbits[4], 0,
+            inbits[0], inbits[1], inbits[2], inbits[3], 1 - inbits[4], inbits[5],
+            inbits[0], inbits[1], inbits[2], inbits[3], inbits[4], 1 - inbits[5],
+        ])
     elif modtype == "256qam":
-        newbits = np.array([
-            1-inbits[0],inbits[1],0,inbits[3],1,inbits[5],1,inbits[7],
-            inbits[0], 1-inbits[1],inbits[2],0, inbits[4],1,inbits[6],1,
-            inbits[0],inbits[1],1-inbits[2],inbits[3],0,inbits[5],1,inbits[7],
-            inbits[0], inbits[1],inbits[2],1-inbits[3], inbits[4],0,inbits[6],1,
-            inbits[0],inbits[1],inbits[2],inbits[3],1-inbits[4],inbits[5],0,inbits[7],
-            inbits[0], inbits[1],inbits[2],inbits[3], inbits[4],1-inbits[5],inbits[6],0,
-            inbits[0],inbits[1],inbits[2],inbits[3],inbits[4],inbits[5],1-inbits[6],inbits[7],
-            inbits[0], inbits[1],inbits[2],inbits[3], inbits[4],inbits[5],inbits[6],1-inbits[7],
-            ])
-        opposite_syms = nrModulate(newbits, modtype)
+        replacement_bits = np.array([
+            1 - inbits[0], inbits[1], 0, inbits[3], 1, inbits[5], 1, inbits[7],
+            inbits[0], 1 - inbits[1], inbits[2], 0, inbits[4], 1, inbits[6], 1,
+            inbits[0], inbits[1], 1 - inbits[2], inbits[3], 0, inbits[5], 1, inbits[7],
+            inbits[0], inbits[1], inbits[2], 1 - inbits[3], inbits[4], 0, inbits[6], 1,
+            inbits[0], inbits[1], inbits[2], inbits[3], 1 - inbits[4], inbits[5], 0, inbits[7],
+            inbits[0], inbits[1], inbits[2], inbits[3], inbits[4], 1 - inbits[5], inbits[6], 0,
+            inbits[0], inbits[1], inbits[2], inbits[3], inbits[4], inbits[5], 1 - inbits[6], inbits[7],
+            inbits[0], inbits[1], inbits[2], inbits[3], inbits[4], inbits[5], inbits[6], 1 - inbits[7],
+        ])
     elif modtype == "1024qam":
-        newbits = np.array([
-            1-inbits[0],inbits[1],0,inbits[3],1,inbits[5],1,inbits[7],1,inbits[9],
-            inbits[0],1-inbits[1],inbits[2],0,inbits[4],1,inbits[6],1,inbits[8],1,
-            inbits[0],inbits[1],1-inbits[2],inbits[3],0,inbits[5],1,inbits[7],1,inbits[9],
-            inbits[0],inbits[1],inbits[2],1-inbits[3],inbits[4],0,inbits[6],1,inbits[8],1,
-            inbits[0],inbits[1],inbits[2],inbits[3],1-inbits[4],inbits[5],0,inbits[7],1,inbits[9],
-            inbits[0],inbits[1],inbits[2],inbits[3],inbits[4],1-inbits[5],inbits[6],0,inbits[8],1,
-            inbits[0],inbits[1],inbits[2],inbits[3],inbits[4],inbits[5],1-inbits[6],inbits[7],0,inbits[9],
-            inbits[0],inbits[1],inbits[2],inbits[3],inbits[4],inbits[5],inbits[6],1-inbits[7],inbits[8],0,
-            inbits[0],inbits[1],inbits[2],inbits[3],inbits[4],inbits[5],inbits[6],inbits[7],1-inbits[8],inbits[9],
-            inbits[0],inbits[1],inbits[2],inbits[3],inbits[4],inbits[5],inbits[6],inbits[7],inbits[8],1-inbits[9],
-            ])
-        opposite_syms = nrModulate(newbits, modtype)
-    
-    return opposite_syms
+        replacement_bits = np.array([
+            1 - inbits[0], inbits[1], 0, inbits[3], 1, inbits[5], 1, inbits[7], 1, inbits[9],
+            inbits[0], 1 - inbits[1], inbits[2], 0, inbits[4], 1, inbits[6], 1, inbits[8], 1,
+            inbits[0], inbits[1], 1 - inbits[2], inbits[3], 0, inbits[5], 1, inbits[7], 1, inbits[9],
+            inbits[0], inbits[1], inbits[2], 1 - inbits[3], inbits[4], 0, inbits[6], 1, inbits[8], 1,
+            inbits[0], inbits[1], inbits[2], inbits[3], 1 - inbits[4], inbits[5], 0, inbits[7], 1, inbits[9],
+            inbits[0], inbits[1], inbits[2], inbits[3], inbits[4], 1 - inbits[5], inbits[6], 0, inbits[8], 1,
+            inbits[0], inbits[1], inbits[2], inbits[3], inbits[4], inbits[5], 1 - inbits[6], inbits[7], 0, inbits[9],
+            inbits[0], inbits[1], inbits[2], inbits[3], inbits[4], inbits[5], inbits[6], 1 - inbits[7], inbits[8], 0,
+            inbits[0], inbits[1], inbits[2], inbits[3], inbits[4], inbits[5], inbits[6], inbits[7], 1 - inbits[8], inbits[9],
+            inbits[0], inbits[1], inbits[2], inbits[3], inbits[4], inbits[5], inbits[6], inbits[7], inbits[8], 1 - inbits[9],
+        ])
+    else:
+        raise ValueError(f"unsupported modulation type: {modtype}")
+
+    return nrModulate(replacement_bits, modtype)
+
+
+def get_oppisite_syms(inbits, modtype):
+    """Backward-compatible wrapper for the misspelled original function name."""
+    return get_opposite_syms(inbits, modtype)
+
 
 if __name__ == "__main__":
-    from scipy import io
-    import os
-    
-    print("test nr modulation")
-    from tests.common import test_nrModulation
-    file_lists = test_nrModulation.get_testvectors()
-    count = 1
-    for filename in file_lists:
-        print("count= {}, filename= {}".format(count, filename))
-        count += 1
-        test_nrModulation.test_nr_modulation(filename)
+    examples = {
+        "qpsk": np.array([0, 1, 1, 0], dtype=np.uint8),
+        "1024qam": np.array([0, 1, 0, 1, 0, 1, 0, 1, 0, 1], dtype=np.uint8),
+    }
+
+    for modtype, bits in examples.items():
+        symbols = nrModulate(bits, modtype)
+        print(f"{modtype} example: {np.round(symbols, 4).tolist()}")
