@@ -16,6 +16,9 @@
 #define PROFILE_WARMUP_ITERATIONS 10
 #define PROFILE_ITERATIONS 1000
 
+extern int32_t cuda_crc_encode_bits(const uint8_t *input_bytes,
+    uint8_t *out_bits, uint16_t A, uint16_t B, int crctype);
+
 uint8_t info_bits[8448]; // 
 uint8_t info_bytes[8448/8]; // Size should be ceil(K/8) bytes for storing K bits
 ldpc_in_config_t inconfig;
@@ -28,6 +31,8 @@ typedef int (*gen_ldpc_parameters_fn_t)(ldpc_config_t *params,
     ldpc_in_config_t *inconfig);
 typedef uint32_t (*calculate_crc_fn_t)(const uint8_t *data, int len,
     int crctype);
+typedef int32_t (*cuda_crc_encode_bits_fn_t)(const uint8_t *input_bytes,
+    uint8_t *out_bits, uint16_t A, uint16_t B, int crctype);
 typedef int32_t (*nr_ldpc_encode_fn_t)(uint8_t *in_bits, uint8_t *out_bits,
     ldpc_config_t *ldpc_config);
 typedef void (*nr_ldpc_rate_match_fn_t)(uint8_t *inbits, uint8_t *outbytes,
@@ -37,6 +42,7 @@ typedef struct {
     ldpc_encode_fn_t top_encode;
     gen_ldpc_parameters_fn_t gen_params;
     calculate_crc_fn_t crc;
+    cuda_crc_encode_bits_fn_t cuda_crc_encode_bits;
     nr_ldpc_encode_fn_t ldpc_encode;
     nr_ldpc_rate_match_fn_t rate_match;
 } encoder_api_t;
@@ -87,6 +93,7 @@ static int load_c_lib_encoder(void **handle, encoder_api_t *api)
     api->top_encode = (ldpc_encode_fn_t)dlsym(*handle, "c_ldpc_5g_encode");
     api->gen_params = (gen_ldpc_parameters_fn_t)dlsym(*handle, "gen_ldpc_parameters");
     api->crc = (calculate_crc_fn_t)dlsym(*handle, "calculate_crc");
+    api->cuda_crc_encode_bits = NULL;
     api->ldpc_encode = (nr_ldpc_encode_fn_t)dlsym(*handle, "nr_ldpc_encode");
     api->rate_match = (nr_ldpc_rate_match_fn_t)dlsym(*handle, "nr_ldpc_rate_match");
 
@@ -154,23 +161,32 @@ static int profiled_encode_once(const encoder_api_t *api, uint8_t *out_bytes,
     }
     profile->gen_params_ms += now_seconds() - t0;
 
-    t0 = now_seconds();
-    crc = api->crc(info_bytes, inconfig.A / 8, inconfig.crctype);
-    profile->crc_ms += now_seconds() - t0;
+    if (api->cuda_crc_encode_bits != NULL) {
+        t0 = now_seconds();
+        if (api->cuda_crc_encode_bits(info_bytes, ldpc_in_bit, ldpc_config.A,
+                ldpc_config.B, ldpc_config.crctype) != 0) {
+            return 1;
+        }
+        profile->crc_ms += now_seconds() - t0;
+    } else {
+        t0 = now_seconds();
+        crc = api->crc(info_bytes, inconfig.A / 8, inconfig.crctype);
+        profile->crc_ms += now_seconds() - t0;
 
-    t0 = now_seconds();
-    for (int i = 0; i < inconfig.A; i++) {
-        int byte_idx = i / 8;
-        int bit_pos = 7 - (i % 8);
-        ldpc_in_bit[i] = (info_bytes[byte_idx] >> bit_pos) & 0x01;
-    }
+        t0 = now_seconds();
+        for (int i = 0; i < inconfig.A; i++) {
+            int byte_idx = i / 8;
+            int bit_pos = 7 - (i % 8);
+            ldpc_in_bit[i] = (info_bytes[byte_idx] >> bit_pos) & 0x01;
+        }
 
-    int first_bit_pos = ldpc_config.B - ldpc_config.A - 1;
-    for (int i = 0; i < ldpc_config.B - ldpc_config.A; i++) {
-        int bit_pos = first_bit_pos - i;
-        ldpc_in_bit[ldpc_config.A + i] = (crc >> bit_pos) & 1;
+        int first_bit_pos = ldpc_config.B - ldpc_config.A - 1;
+        for (int i = 0; i < ldpc_config.B - ldpc_config.A; i++) {
+            int bit_pos = first_bit_pos - i;
+            ldpc_in_bit[ldpc_config.A + i] = (crc >> bit_pos) & 1;
+        }
+        profile->unpack_ms += now_seconds() - t0;
     }
-    profile->unpack_ms += now_seconds() - t0;
 
     t0 = now_seconds();
     if (api->ldpc_encode(ldpc_in_bit, ldpc_out_bits, &ldpc_config) != 0) {
@@ -301,6 +317,7 @@ int main() {
         c_ldpc_5g_encode,
         gen_ldpc_parameters,
         calculate_crc,
+        cuda_crc_encode_bits,
         nr_ldpc_encode,
         nr_ldpc_rate_match
     };

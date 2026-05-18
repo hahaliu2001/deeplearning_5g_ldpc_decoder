@@ -41,9 +41,7 @@ typedef struct {
     ldpc_decode_fn_t top_decode;
     gen_ldpc_parameters_fn_t gen_params;
     rate_recover_fn_t rate_recover;
-    layered_decode_fn_t layered_bp;
     layered_decode_fn_t layered_minsum;
-    layered_decode_fn_t layered_neural;
     layered_decode_fn_t layered_degree;
     int16_t *harq_memory;
 } decoder_api_t;
@@ -70,14 +68,8 @@ static void clear_hardbits(uint8_t *buffer)
 
 static layered_decode_fn_t select_layered_decoder(const decoder_api_t *api)
 {
-    if (decoder_config.algo == 0) {
-        return api->layered_bp;
-    }
     if (decoder_config.algo == 1) {
         return api->layered_minsum;
-    }
-    if (decoder_config.algo == 2) {
-        return api->layered_neural;
     }
     if (decoder_config.algo == 3) {
         return api->layered_degree;
@@ -110,12 +102,8 @@ static int load_c_lib_decoder(void **handle, decoder_api_t *api)
     api->gen_params = (gen_ldpc_parameters_fn_t)dlsym(*handle, "gen_ldpc_parameters");
     api->rate_recover = (rate_recover_fn_t)dlsym(*handle,
         "nr_ldpc_rate_recover_harq_combine");
-    api->layered_bp = (layered_decode_fn_t)dlsym(*handle,
-        "layered_BP_ldpc_decode");
     api->layered_minsum = (layered_decode_fn_t)dlsym(*handle,
         "layered_minsum_ldpc_decode");
-    api->layered_neural = (layered_decode_fn_t)dlsym(*handle,
-        "layered_neural_minsum_ldpc_decode");
     api->layered_degree = (layered_decode_fn_t)dlsym(*handle,
         "layered_degree_minsum_ldpc_decode");
     api->harq_memory = (int16_t *)dlsym(*handle, "HARQ_memory");
@@ -326,9 +314,7 @@ int main() {
         c_ldpc_5g_decode,
         gen_ldpc_parameters,
         nr_ldpc_rate_recover_harq_combine,
-        layered_BP_ldpc_decode,
         layered_minsum_ldpc_decode,
-        layered_neural_minsum_ldpc_decode,
         layered_degree_minsum_ldpc_decode,
         HARQ_memory
     };

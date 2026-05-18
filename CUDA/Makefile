@@ -3,7 +3,7 @@ PATH := $(CUDA12_BIN):$(PATH)
 export PATH
 NVCC ?= /usr/local/cuda/bin/nvcc
 
-CUDAFLAGS = -O3 -Xcompiler -fPIC -cudart shared -I ../c_lib
+CUDAFLAGS = -O3 -std=c++14 -Xcompiler -fPIC -cudart shared -I ../c_lib
 LDFLAGS = -shared -lm
 EXE_LDFLAGS = -Xlinker -rpath -Xlinker '$$ORIGIN'
 EXE_LIBS = -ldl
@@ -12,16 +12,13 @@ LIB_NAME = libnrLDPC_cuda.so
 DECODER_EXE_NAME = test_ldpc_5g_decoder_cuda
 ENCODER_EXE_NAME = test_ldpc_5g_encoder_cuda
 
-SRCS = nr_crc.cu \
+SRCS = nr_crc_tables.cu \
+       nr_crc.cu \
        ldpc_tables.cu \
        ldpc_internal.cu \
        ldpc_rate_recovery.cu \
        fixedpoint_ldpc_decoder.cu \
        degree_fixedpoint_ldpc_decoder.cu \
-       BG1_trained_ldpc_weights.cu \
-       BG2_trained_ldpc_weights.cu \
-       neural_fixedpoint_ldpc_decoder.cu \
-       floatpoint_ldpc_decoder.cu \
        c_ldpc_5g_decoder.cu \
        c_ldpc_5g_encoder.cu \
        ldpc_rate_match.cu \

@@ -6,8 +6,12 @@
 
 #include "nr_ldpc.h"
 
-static uint8_t ldpc_in_bit[MAX_ZC*22]; //max bit size for bgn=1
 static uint8_t ldpc_out_bits[MAX_ZC * BG1_NUM_COLS]; // includes the 2*Zc punctured prefix
+
+extern int32_t cuda_crc_encode_bits_to_device(const uint8_t *input_bytes,
+    uint8_t **device_out_bits, uint16_t A, uint16_t B, int crctype);
+extern int32_t cuda_nr_ldpc_encode_from_device(const uint8_t *device_in_bits,
+    uint8_t *out_bits, ldpc_config_t *ldpc_config);
 
 /********* LDPC Decoder Main Function *********/
 int32_t c_ldpc_5g_encode(uint8_t *infobytes, uint8_t *rm_bytes, ldpc_in_config_t *inconfig) {
@@ -21,25 +25,17 @@ int32_t c_ldpc_5g_encode(uint8_t *infobytes, uint8_t *rm_bytes, ldpc_in_config_t
         return -2; // Invalid ldpc configuration
     }
 
-    //crc encoder
-    uint32_t crc = calculate_crc(infobytes, inconfig->A/8, inconfig->crctype);
+    uint8_t *device_ldpc_in_bits = NULL;
 
-    //unpack bytes to bits with MSB first
-    for(int i=0; i<inconfig->A; i++) {
-        int byte_idx = i / 8;
-        int bit_pos = 7 - (i % 8);
-        ldpc_in_bit[i] = (infobytes[byte_idx] >> bit_pos) & 0x01;
-    }
-
-    //unpack crc
-    int first_bit_pos = ldpc_config.B-ldpc_config.A - 1;
-    for(int i=0; i<ldpc_config.B-ldpc_config.A; i++) {
-        int bit_pos = first_bit_pos - i;
-        ldpc_in_bit[ldpc_config.A + i] = (crc >> bit_pos) & 1;
+    // Prepare payload bits and CRC bits on CUDA. A is byte-aligned in this path.
+    if (cuda_crc_encode_bits_to_device(infobytes, &device_ldpc_in_bits,
+            ldpc_config.A, ldpc_config.B, ldpc_config.crctype) != 0) {
+        return -1;
     }
 
     //ldpc encoding
-    if (nr_ldpc_encode(ldpc_in_bit, ldpc_out_bits, &ldpc_config) != 0) {
+    if (cuda_nr_ldpc_encode_from_device(device_ldpc_in_bits, ldpc_out_bits,
+            &ldpc_config) != 0) {
         return -1;
     }
 

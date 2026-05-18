@@ -227,11 +227,8 @@ static __global__ void cuda_encoder_remaining_parity_kernel(
     out_bits[K + Zc * HBG_row + zx] = ps;
 }
 
-/*LDPC encoder
-in_bit: input bit stream of size B
-out_bits: B input bits + F filling bits + w sequence, 
-*/
-int32_t nr_ldpc_encode(uint8_t *in_bits, uint8_t *out_bits, ldpc_config_t *ldpc_config){
+static int32_t nr_ldpc_encode_device_input(const uint8_t *device_in_bits,
+    uint8_t *out_bits, ldpc_config_t *ldpc_config) {
     uint16_t bgn = ldpc_config->bgn;
     uint16_t Zc = ldpc_config->Zc;
     uint16_t K = ldpc_config->K;
@@ -251,9 +248,6 @@ int32_t nr_ldpc_encode(uint8_t *in_bits, uint8_t *out_bits, ldpc_config_t *ldpc_
             row_offsets) != 0) {
         return -1;
     }
-
-    CUDA_CHECK_ENCODE(cudaMemcpy(ws->in_bits, in_bits, sizeof(uint8_t) * B,
-        cudaMemcpyHostToDevice));
 
     if (ws->host_Vij_array != Vij_array || ws->cached_bgn != bgn ||
             ws->cached_Zc != Zc || ws->cached_iLS != ldpc_config->iLS) {
@@ -280,7 +274,7 @@ int32_t nr_ldpc_encode(uint8_t *in_bits, uint8_t *out_bits, ldpc_config_t *ldpc_
 
     const int threads = 128;
     cuda_encoder_init_kernel<<<(out_count + threads - 1) / threads, threads>>>(
-        ws->in_bits, ws->out_bits, B, K, (uint16_t)out_count);
+        device_in_bits, ws->out_bits, B, K, (uint16_t)out_count);
     CUDA_CHECK_ENCODE(cudaGetLastError());
 
     cuda_encoder_first_parity_kernel<<<1, MAX_ZC>>>(
@@ -300,6 +294,35 @@ int32_t nr_ldpc_encode(uint8_t *in_bits, uint8_t *out_bits, ldpc_config_t *ldpc_
         cudaMemcpyDeviceToHost));
 
     return 0;
+}
+
+int32_t cuda_nr_ldpc_encode_from_device(const uint8_t *device_in_bits,
+    uint8_t *out_bits, ldpc_config_t *ldpc_config) {
+    if (device_in_bits == NULL || out_bits == NULL || ldpc_config == NULL) {
+        return -1;
+    }
+
+    return nr_ldpc_encode_device_input(device_in_bits, out_bits, ldpc_config);
+}
+
+/*LDPC encoder
+in_bit: input bit stream of size B
+out_bits: B input bits + F filling bits + w sequence, 
+*/
+int32_t nr_ldpc_encode(uint8_t *in_bits, uint8_t *out_bits, ldpc_config_t *ldpc_config){
+    cuda_encoder_workspace_t *ws = &g_encoder_workspace;
+
+    if (in_bits == NULL || out_bits == NULL || ldpc_config == NULL) {
+        return -1;
+    }
+    if (cuda_encoder_ensure_workspace(ws, ldpc_config->B, 0, 0, 0) != 0) {
+        return -1;
+    }
+
+    CUDA_CHECK_ENCODE(cudaMemcpy(ws->in_bits, in_bits,
+        sizeof(uint8_t) * ldpc_config->B, cudaMemcpyHostToDevice));
+
+    return nr_ldpc_encode_device_input(ws->in_bits, out_bits, ldpc_config);
 }
 
 int32_t bak_nr_ldpc_encode(uint8_t *in_bits, uint8_t *out_bits, ldpc_config_t *ldpc_config){
