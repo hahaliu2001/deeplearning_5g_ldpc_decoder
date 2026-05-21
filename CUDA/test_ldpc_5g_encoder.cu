@@ -16,8 +16,12 @@
 #define PROFILE_WARMUP_ITERATIONS 10
 #define PROFILE_ITERATIONS 1000
 
-extern int32_t cuda_crc_encode_bits(const uint8_t *input_bytes,
-    uint8_t *out_bits, uint16_t A, uint16_t B, int crctype);
+// CUDA CRC helper can return host bytes, device bytes, and/or integer CRC.
+// The staged encoder profile requests host bytes plus CRC for comparison with
+// the C fallback path.
+extern int32_t cuda_crc_encode_bytes(const uint8_t *input_bytes,
+    uint8_t *out_bytes, uint8_t **device_out_bytes, uint32_t *crc,
+    uint16_t A, uint16_t B, int crctype);
 
 uint8_t info_bits[8448]; // 
 uint8_t info_bytes[8448/8]; // Size should be ceil(K/8) bytes for storing K bits
@@ -31,8 +35,9 @@ typedef int (*gen_ldpc_parameters_fn_t)(ldpc_config_t *params,
     ldpc_in_config_t *inconfig);
 typedef uint32_t (*calculate_crc_fn_t)(const uint8_t *data, int len,
     int crctype);
-typedef int32_t (*cuda_crc_encode_bits_fn_t)(const uint8_t *input_bytes,
-    uint8_t *out_bits, uint16_t A, uint16_t B, int crctype);
+typedef int32_t (*cuda_crc_encode_bytes_fn_t)(const uint8_t *input_bytes,
+    uint8_t *out_bytes, uint8_t **device_out_bytes, uint32_t *crc,
+    uint16_t A, uint16_t B, int crctype);
 typedef int32_t (*nr_ldpc_encode_fn_t)(uint8_t *in_bits, uint8_t *out_bits,
     ldpc_config_t *ldpc_config);
 typedef void (*nr_ldpc_rate_match_fn_t)(uint8_t *inbits, uint8_t *outbytes,
@@ -42,7 +47,7 @@ typedef struct {
     ldpc_encode_fn_t top_encode;
     gen_ldpc_parameters_fn_t gen_params;
     calculate_crc_fn_t crc;
-    cuda_crc_encode_bits_fn_t cuda_crc_encode_bits;
+    cuda_crc_encode_bytes_fn_t cuda_crc_encode_bytes;
     nr_ldpc_encode_fn_t ldpc_encode;
     nr_ldpc_rate_match_fn_t rate_match;
 } encoder_api_t;
@@ -93,7 +98,7 @@ static int load_c_lib_encoder(void **handle, encoder_api_t *api)
     api->top_encode = (ldpc_encode_fn_t)dlsym(*handle, "c_ldpc_5g_encode");
     api->gen_params = (gen_ldpc_parameters_fn_t)dlsym(*handle, "gen_ldpc_parameters");
     api->crc = (calculate_crc_fn_t)dlsym(*handle, "calculate_crc");
-    api->cuda_crc_encode_bits = NULL;
+    api->cuda_crc_encode_bytes = NULL;
     api->ldpc_encode = (nr_ldpc_encode_fn_t)dlsym(*handle, "nr_ldpc_encode");
     api->rate_match = (nr_ldpc_rate_match_fn_t)dlsym(*handle, "nr_ldpc_rate_match");
 
@@ -143,10 +148,21 @@ static double profile_encoder(const char *name, ldpc_encode_fn_t encode_fn,
     return elapsed * 1000.0 / (double)PROFILE_ITERATIONS;
 }
 
+static void unpack_bytes_msb_first(const uint8_t *in_bytes,
+    uint8_t *out_bits, uint16_t num_bits)
+{
+    for (uint16_t i = 0; i < num_bits; i++) {
+        uint16_t byte_idx = i / 8u;
+        uint8_t bit_pos = (uint8_t)(7u - (i % 8u));
+        out_bits[i] = (uint8_t)((in_bytes[byte_idx] >> bit_pos) & 0x01u);
+    }
+}
+
 static int profiled_encode_once(const encoder_api_t *api, uint8_t *out_bytes,
     encoder_profile_t *profile)
 {
     uint8_t ldpc_in_bit[MAX_ZC * 22];
+    uint8_t ldpc_in_bytes[MAX_ZC * 22 / 8];
     uint8_t ldpc_out_bits[MAX_ZC * BG1_NUM_COLS];
     ldpc_config_t ldpc_config;
     uint32_t crc;
@@ -161,13 +177,18 @@ static int profiled_encode_once(const encoder_api_t *api, uint8_t *out_bytes,
     }
     profile->gen_params_ms += now_seconds() - t0;
 
-    if (api->cuda_crc_encode_bits != NULL) {
+    if (api->cuda_crc_encode_bytes != NULL) {
         t0 = now_seconds();
-        if (api->cuda_crc_encode_bits(info_bytes, ldpc_in_bit, ldpc_config.A,
-                ldpc_config.B, ldpc_config.crctype) != 0) {
+        if (api->cuda_crc_encode_bytes(info_bytes, ldpc_in_bytes,
+                NULL, &crc, ldpc_config.A, ldpc_config.B,
+                ldpc_config.crctype) != 0) {
             return 1;
         }
         profile->crc_ms += now_seconds() - t0;
+
+        t0 = now_seconds();
+        unpack_bytes_msb_first(ldpc_in_bytes, ldpc_in_bit, ldpc_config.B);
+        profile->unpack_ms += now_seconds() - t0;
     } else {
         t0 = now_seconds();
         crc = api->crc(info_bytes, inconfig.A / 8, inconfig.crctype);
@@ -317,7 +338,7 @@ int main() {
         c_ldpc_5g_encode,
         gen_ldpc_parameters,
         calculate_crc,
-        cuda_crc_encode_bits,
+        cuda_crc_encode_bytes,
         nr_ldpc_encode,
         nr_ldpc_rate_match
     };

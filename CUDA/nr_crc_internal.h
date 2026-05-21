@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+// Shared CRC constants for the CUDA CRC implementation.
+//
+// The numeric type IDs match the C/Python encoder paths:
+//   0: CRC16, 1: CRC24A, 2: CRC24B, 3: CRC24C.
 #define CRC_TABLE_SIZE 256
 
 #define CRC16_TYPE 0
@@ -24,6 +28,10 @@
 #define CRC24B_POLY 0x800063
 #define CRC24C_POLY 0xB2B117
 
+// Runtime view of one CRC variant.
+//
+// table is the normal byte-wise lookup table. word_contribution_table stores
+// the same polynomial transformed for the CUDA 32-bit update path.
 typedef struct {
     uint16_t width;
     uint32_t polynomial;
@@ -33,6 +41,7 @@ typedef struct {
     const uint32_t *word_contribution_table;
 } crc_spec_t;
 
+// Resolve the public crctype ID into static tables and polynomial parameters.
 int cuda_crc_get_spec(int crctype, crc_spec_t *spec);
 
 #endif

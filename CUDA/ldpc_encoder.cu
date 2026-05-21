@@ -112,6 +112,21 @@ static __global__ void cuda_encoder_init_kernel(
     }
 }
 
+static __global__ void cuda_unpack_input_bytes_kernel(
+    const uint8_t *in_bytes,
+    uint8_t *out_bits,
+    uint16_t B)
+{
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= B) {
+        return;
+    }
+
+    uint32_t byte_idx = idx / 8u;
+    uint8_t bit_pos = (uint8_t)(7u - (idx % 8u));
+    out_bits[idx] = (uint8_t)((in_bytes[byte_idx] >> bit_pos) & 0x01u);
+}
+
 static __global__ void cuda_encoder_first_parity_kernel(
     uint8_t *out_bits,
     uint8_t *pc,
@@ -303,6 +318,26 @@ int32_t cuda_nr_ldpc_encode_from_device(const uint8_t *device_in_bits,
     }
 
     return nr_ldpc_encode_device_input(device_in_bits, out_bits, ldpc_config);
+}
+
+int32_t cuda_nr_ldpc_encode_packed_from_device(const uint8_t *device_in_bytes,
+    uint8_t *out_bits, ldpc_config_t *ldpc_config) {
+    cuda_encoder_workspace_t *ws = &g_encoder_workspace;
+    const int threads = 128;
+
+    if (device_in_bytes == NULL || out_bits == NULL || ldpc_config == NULL) {
+        return -1;
+    }
+    if (cuda_encoder_ensure_workspace(ws, ldpc_config->B, 0, 0, 0) != 0) {
+        return -1;
+    }
+
+    cuda_unpack_input_bytes_kernel<<<
+        (ldpc_config->B + threads - 1) / threads, threads>>>(
+        device_in_bytes, ws->in_bits, ldpc_config->B);
+    CUDA_CHECK_ENCODE(cudaGetLastError());
+
+    return nr_ldpc_encode_device_input(ws->in_bits, out_bits, ldpc_config);
 }
 
 /*LDPC encoder

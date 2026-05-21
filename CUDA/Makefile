@@ -11,6 +11,7 @@ EXE_LIBS = -ldl
 LIB_NAME = libnrLDPC_cuda.so
 DECODER_EXE_NAME = test_ldpc_5g_decoder_cuda
 ENCODER_EXE_NAME = test_ldpc_5g_encoder_cuda
+CRC_EXE_NAME = test_nr_crc_cuda
 
 SRCS = nr_crc_tables.cu \
        nr_crc.cu \
@@ -28,7 +29,7 @@ OBJS = $(SRCS:.cu=.o)
 
 all: $(LIB_NAME) tests
 
-tests: $(DECODER_EXE_NAME) $(ENCODER_EXE_NAME)
+tests: $(DECODER_EXE_NAME) $(ENCODER_EXE_NAME) $(CRC_EXE_NAME)
 
 $(LIB_NAME): $(OBJS)
 	$(NVCC) -o $@ $^ $(LDFLAGS)
@@ -39,10 +40,13 @@ $(DECODER_EXE_NAME): test_ldpc_5g_decoder.cu $(LIB_NAME)
 $(ENCODER_EXE_NAME): test_ldpc_5g_encoder.cu $(LIB_NAME)
 	$(NVCC) $(CUDAFLAGS) -o $@ $< -L. -lnrLDPC_cuda $(EXE_LDFLAGS) $(EXE_LIBS)
 
+$(CRC_EXE_NAME): test_nr_crc.cu $(LIB_NAME)
+	$(NVCC) $(CUDAFLAGS) -o $@ $< -L. -lnrLDPC_cuda $(EXE_LDFLAGS)
+
 %.o: %.cu
 	$(NVCC) $(CUDAFLAGS) -c $< -o $@
 
 clean:
-	rm -f *.o $(LIB_NAME) $(DECODER_EXE_NAME) $(ENCODER_EXE_NAME)
+	rm -f *.o $(LIB_NAME) $(DECODER_EXE_NAME) $(ENCODER_EXE_NAME) $(CRC_EXE_NAME)
 
 .PHONY: all tests clean
