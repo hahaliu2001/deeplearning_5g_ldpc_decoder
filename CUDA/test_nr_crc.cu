@@ -8,21 +8,14 @@
 #include "nr_crc_internal.h"
 #include "nr_ldpc.h"
 
-extern int32_t cuda_crc_encode_bytes(const uint8_t *input_bytes,
-    uint8_t *out_bytes, uint8_t **device_out_bytes, uint32_t *crc,
-    uint16_t A, uint16_t B, int crctype);
-extern int32_t cuda_crc_encode_bytes_batch(const uint8_t *input_bytes,
-    uint8_t *out_bytes, uint32_t *crc, uint16_t A, uint16_t B, int crctype,
-    uint32_t block_count);
+extern int32_t cuda_crc_encode_bits_to_device(const uint8_t *input_bytes,
+    uint8_t *device_out_bits, uint32_t *crc, uint16_t A, uint16_t B,
+    int crctype);
 
 // Keep the benchmark short enough for routine test runs while still doing
 // enough repetitions to smooth out timer noise.
 #define CRC_BENCH_WARMUP 5u
 #define CRC_BENCH_ITERATIONS 200u
-
-// The batched benchmark amortizes CUDA launch overhead across many independent
-// CRC blocks. This is the workload shape where GPU CRC can be useful.
-#define CRC_BENCH_BATCH_BLOCKS 4096u
 
 static double now_seconds() {
     struct timespec ts;
@@ -57,39 +50,48 @@ static uint32_t crc_len_bytes_for_type(int crctype) {
     return crctype == CRC16_TYPE ? 2u : 3u;
 }
 
-static int check_host_output(const uint8_t *payload, uint32_t input_len,
-    const uint8_t *encoded, uint32_t output_len, uint32_t reported_crc,
+static int check_device_bit_output(const uint8_t *payload, uint32_t input_len,
+    const uint8_t *encoded_bits, uint32_t output_bits, uint32_t reported_crc,
     int crctype) {
-    uint32_t crc_len_bytes = crc_len_bytes_for_type(crctype);
+    uint32_t crc_len_bits = crc_len_bytes_for_type(crctype) * 8u;
     uint32_t expected_crc = calculate_crc(payload, (int)input_len, crctype);
 
     if (reported_crc != expected_crc) {
         fprintf(stderr,
-            "CRC value mismatch: type=%d len=%u got=0x%08x expected=0x%08x\n",
+            "CRC bit-output value mismatch: type=%d len=%u got=0x%08x expected=0x%08x\n",
             crctype, input_len, reported_crc, expected_crc);
         return 1;
     }
 
-    if (memcmp(encoded, payload, input_len) != 0) {
-        fprintf(stderr, "Payload copy mismatch: type=%d len=%u\n",
-            crctype, input_len);
-        return 1;
-    }
-
-    for (uint32_t i = 0; i < crc_len_bytes; i++) {
-        uint32_t shift = (crc_len_bytes - 1u - i) * 8u;
-        uint8_t expected_byte = (uint8_t)((expected_crc >> shift) & 0xFFu);
-        if (encoded[input_len + i] != expected_byte) {
+    for (uint32_t bit = 0; bit < input_len * 8u; bit++) {
+        uint32_t byte_idx = bit / 8u;
+        uint8_t bit_pos = (uint8_t)(7u - (bit % 8u));
+        uint8_t expected_bit =
+            (uint8_t)((payload[byte_idx] >> bit_pos) & 0x01u);
+        if (encoded_bits[bit] != expected_bit) {
             fprintf(stderr,
-                "CRC byte mismatch: type=%d len=%u byte=%u got=0x%02x expected=0x%02x\n",
-                crctype, input_len, i, encoded[input_len + i],
-                expected_byte);
+                "Payload bit mismatch: type=%d len=%u bit=%u got=%u expected=%u\n",
+                crctype, input_len, bit, encoded_bits[bit], expected_bit);
             return 1;
         }
     }
 
-    if (output_len != input_len + crc_len_bytes) {
-        fprintf(stderr, "Internal test length mismatch\n");
+    for (uint32_t bit = 0; bit < crc_len_bits; bit++) {
+        uint32_t crc_bit_pos = crc_len_bits - 1u - bit;
+        uint8_t expected_bit =
+            (uint8_t)((expected_crc >> crc_bit_pos) & 0x01u);
+        uint32_t out_bit = input_len * 8u + bit;
+        if (encoded_bits[out_bit] != expected_bit) {
+            fprintf(stderr,
+                "CRC bit mismatch: type=%d len=%u bit=%u got=%u expected=%u\n",
+                crctype, input_len, bit, encoded_bits[out_bit],
+                expected_bit);
+            return 1;
+        }
+    }
+
+    if (output_bits != (input_len * 8u + crc_len_bits)) {
+        fprintf(stderr, "Internal bit-output test length mismatch\n");
         return 1;
     }
 
@@ -98,57 +100,50 @@ static int check_host_output(const uint8_t *payload, uint32_t input_len,
 
 static int run_one_case(int crctype, uint32_t input_len) {
     uint8_t payload[MAX_ZC * 22u / 8u];
-    uint8_t host_encoded[MAX_ZC * 22u / 8u];
-    uint8_t device_encoded[MAX_ZC * 22u / 8u];
-    static uint8_t batch_payload[CRC_BENCH_BATCH_BLOCKS * (MAX_ZC * 22u / 8u)];
-    static uint8_t batch_encoded[CRC_BENCH_BATCH_BLOCKS * (MAX_ZC * 22u / 8u)];
-    static uint32_t batch_crc[CRC_BENCH_BATCH_BLOCKS];
-    uint8_t *device_out = NULL;
-    uint32_t host_crc = 0;
+    uint8_t device_encoded_bits[MAX_ZC * 22u];
+    uint8_t *device_out_bits = NULL;
     uint32_t device_crc = 0;
     uint32_t crc_len_bytes = crc_len_bytes_for_type(crctype);
     uint32_t output_len = input_len + crc_len_bytes;
+    uint32_t output_bits = output_len * 8u;
 
     // Use deterministic pseudo-random payloads so failures are reproducible
     // and every CRC type/length combination exercises different byte values.
     for (uint32_t i = 0; i < input_len; i++) {
         payload[i] = (uint8_t)make_payload_byte(i, crctype, input_len);
     }
-    memset(host_encoded, 0xA5, sizeof(host_encoded));
-    memset(device_encoded, 0x5A, sizeof(device_encoded));
+    memset(device_encoded_bits, 0x3C, sizeof(device_encoded_bits));
 
-    // Correctness path 1: request a host copy of payload+CRC plus the integer
-    // CRC remainder from the CUDA helper.
-    if (cuda_crc_encode_bytes(payload, host_encoded, NULL, &host_crc,
-            (uint16_t)(input_len * 8u), (uint16_t)(output_len * 8u),
-            crctype) != 0) {
-        fprintf(stderr, "cuda_crc_encode_bytes host path failed: type=%d len=%u\n",
-            crctype, input_len);
+    // Correctness path: write payload+CRC directly as device bits, mirroring
+    // the LDPC encoder path, then copy it back here for test validation.
+    cudaError_t cuda_status = cudaMalloc((void **)&device_out_bits,
+        output_bits);
+    if (cuda_status != cudaSuccess) {
+        fprintf(stderr, "Failed to allocate device CRC bit output: %s\n",
+            cudaGetErrorString(cuda_status));
         return 1;
     }
-    if (check_host_output(payload, input_len, host_encoded, output_len,
-            host_crc, crctype) != 0) {
-        return 1;
-    }
-
-    // Correctness path 2: request only the device output pointer, mirroring the
-    // LDPC encoder path, then copy it back here just for test validation.
-    if (cuda_crc_encode_bytes(payload, NULL, &device_out, &device_crc,
+    if (cuda_crc_encode_bits_to_device(payload, device_out_bits, &device_crc,
             (uint16_t)(input_len * 8u), (uint16_t)(output_len * 8u),
             crctype) != 0) {
         fprintf(stderr,
-            "cuda_crc_encode_bytes device path failed: type=%d len=%u\n",
+            "cuda_crc_encode_bits_to_device path failed: type=%d len=%u\n",
             crctype, input_len);
+        cudaFree(device_out_bits);
         return 1;
     }
-    if (cudaMemcpy(device_encoded, device_out, output_len,
-            cudaMemcpyDeviceToHost) != cudaSuccess) {
-        fprintf(stderr, "Failed to copy device CRC output: type=%d len=%u\n",
-            crctype, input_len);
+    cuda_status = cudaMemcpy(device_encoded_bits, device_out_bits,
+        output_bits, cudaMemcpyDeviceToHost);
+    if (cuda_status != cudaSuccess) {
+        fprintf(stderr,
+            "Failed to copy device CRC bit output: type=%d len=%u: %s\n",
+            crctype, input_len, cudaGetErrorString(cuda_status));
+        cudaFree(device_out_bits);
         return 1;
     }
-    if (check_host_output(payload, input_len, device_encoded, output_len,
-            device_crc, crctype) != 0) {
+    if (check_device_bit_output(payload, input_len, device_encoded_bits,
+            output_bits, device_crc, crctype) != 0) {
+        cudaFree(device_out_bits);
         return 1;
     }
 
@@ -156,17 +151,6 @@ static int run_one_case(int crctype, uint32_t input_len) {
     double start;
     double host_us;
     double cuda_device_us;
-    double host_batch_us;
-    double cuda_batch_us;
-
-    // Build a contiguous batch of equal-size payloads. The batch CUDA API
-    // treats this as block_count independent CRC jobs.
-    for (uint32_t block = 0; block < CRC_BENCH_BATCH_BLOCKS; block++) {
-        for (uint32_t i = 0; i < input_len; i++) {
-            batch_payload[block * input_len + i] =
-                (uint8_t)make_payload_byte(i + block, crctype, input_len);
-        }
-    }
 
     // Single-block CPU baseline.
     for (uint32_t i = 0; i < CRC_BENCH_WARMUP; i++) {
@@ -180,115 +164,52 @@ static int run_one_case(int crctype, uint32_t input_len) {
     host_us = (now_seconds() - start) * 1000000.0 /
         (double)CRC_BENCH_ITERATIONS;
 
-    // Single-block CUDA timing. This includes host-to-device input copy and
-    // one kernel launch, so it is expected to be slower than CPU CRC.
+    // Single-block CUDA bit-output timing. This includes host-to-device input
+    // copy and one kernel launch, so it is expected to be slower than CPU CRC.
     for (uint32_t i = 0; i < CRC_BENCH_WARMUP; i++) {
-        if (cuda_crc_encode_bytes(payload, NULL, &device_out, NULL,
+        if (cuda_crc_encode_bits_to_device(payload, device_out_bits, NULL,
                 (uint16_t)(input_len * 8u), (uint16_t)(output_len * 8u),
                 crctype) != 0) {
             fprintf(stderr,
-                "CUDA CRC benchmark warmup failed: type=%d len=%u\n",
+                "CUDA CRC bit-output benchmark warmup failed: type=%d len=%u\n",
                 crctype, input_len);
+            cudaFree(device_out_bits);
             return 1;
         }
     }
-    if (cudaDeviceSynchronize() != cudaSuccess) {
-        fprintf(stderr, "CUDA synchronize failed before benchmark\n");
+    cuda_status = cudaDeviceSynchronize();
+    if (cuda_status != cudaSuccess) {
+        fprintf(stderr, "CUDA synchronize failed before benchmark: %s\n",
+            cudaGetErrorString(cuda_status));
+        cudaFree(device_out_bits);
         return 1;
     }
 
     start = now_seconds();
     for (uint32_t i = 0; i < CRC_BENCH_ITERATIONS; i++) {
-        if (cuda_crc_encode_bytes(payload, NULL, &device_out, NULL,
+        if (cuda_crc_encode_bits_to_device(payload, device_out_bits, NULL,
                 (uint16_t)(input_len * 8u), (uint16_t)(output_len * 8u),
                 crctype) != 0) {
-            fprintf(stderr, "CUDA CRC benchmark failed: type=%d len=%u\n",
+            fprintf(stderr, "CUDA CRC bit-output benchmark failed: type=%d len=%u\n",
                 crctype, input_len);
+            cudaFree(device_out_bits);
             return 1;
         }
     }
-    if (cudaDeviceSynchronize() != cudaSuccess) {
-        fprintf(stderr, "CUDA synchronize failed after benchmark\n");
+    cuda_status = cudaDeviceSynchronize();
+    if (cuda_status != cudaSuccess) {
+        fprintf(stderr, "CUDA synchronize failed after benchmark: %s\n",
+            cudaGetErrorString(cuda_status));
+        cudaFree(device_out_bits);
         return 1;
     }
     cuda_device_us = (now_seconds() - start) * 1000000.0 /
         (double)CRC_BENCH_ITERATIONS;
 
-    // Batched CPU baseline: same number of independent CRC jobs as CUDA batch,
-    // reported per block.
-    for (uint32_t i = 0; i < CRC_BENCH_WARMUP; i++) {
-        for (uint32_t block = 0; block < CRC_BENCH_BATCH_BLOCKS; block++) {
-            host_crc_sink ^= calculate_crc(batch_payload + block * input_len,
-                (int)input_len, crctype);
-        }
-    }
+    printf("%-6s len=%4u host=%8.3f us cuda_bits=%8.3f us\n",
+        crc_type_name(crctype), input_len, host_us, cuda_device_us);
 
-    start = now_seconds();
-    for (uint32_t i = 0; i < CRC_BENCH_ITERATIONS; i++) {
-        for (uint32_t block = 0; block < CRC_BENCH_BATCH_BLOCKS; block++) {
-            host_crc_sink ^= calculate_crc(batch_payload + block * input_len,
-                (int)input_len, crctype);
-        }
-    }
-    host_batch_us = (now_seconds() - start) * 1000000.0 /
-        ((double)CRC_BENCH_ITERATIONS * (double)CRC_BENCH_BATCH_BLOCKS);
-
-    // Validate the batched CUDA path with a host output copy before timing the
-    // device-only benchmark path.
-    if (cuda_crc_encode_bytes_batch(batch_payload, batch_encoded, batch_crc,
-            (uint16_t)(input_len * 8u), (uint16_t)(output_len * 8u),
-            crctype, CRC_BENCH_BATCH_BLOCKS) != 0) {
-        fprintf(stderr, "CUDA CRC batch correctness call failed: type=%d len=%u\n",
-            crctype, input_len);
-        return 1;
-    }
-    for (uint32_t block = 0; block < CRC_BENCH_BATCH_BLOCKS; block +=
-            CRC_BENCH_BATCH_BLOCKS - 1u) {
-        if (check_host_output(batch_payload + block * input_len, input_len,
-                batch_encoded + block * output_len, output_len,
-                batch_crc[block], crctype) != 0) {
-            return 1;
-        }
-    }
-
-    // Batched CUDA timing. This still includes one input copy per iteration,
-    // but the kernel launch is amortized across CRC_BENCH_BATCH_BLOCKS blocks.
-    for (uint32_t i = 0; i < CRC_BENCH_WARMUP; i++) {
-        if (cuda_crc_encode_bytes_batch(batch_payload, NULL, NULL,
-                (uint16_t)(input_len * 8u), (uint16_t)(output_len * 8u),
-                crctype, CRC_BENCH_BATCH_BLOCKS) != 0) {
-            fprintf(stderr,
-                "CUDA CRC batch benchmark warmup failed: type=%d len=%u\n",
-                crctype, input_len);
-            return 1;
-        }
-    }
-    if (cudaDeviceSynchronize() != cudaSuccess) {
-        fprintf(stderr, "CUDA synchronize failed before batch benchmark\n");
-        return 1;
-    }
-
-    start = now_seconds();
-    for (uint32_t i = 0; i < CRC_BENCH_ITERATIONS; i++) {
-        if (cuda_crc_encode_bytes_batch(batch_payload, NULL, NULL,
-                (uint16_t)(input_len * 8u), (uint16_t)(output_len * 8u),
-                crctype, CRC_BENCH_BATCH_BLOCKS) != 0) {
-            fprintf(stderr, "CUDA CRC batch benchmark failed: type=%d len=%u\n",
-                crctype, input_len);
-            return 1;
-        }
-    }
-    if (cudaDeviceSynchronize() != cudaSuccess) {
-        fprintf(stderr, "CUDA synchronize failed after batch benchmark\n");
-        return 1;
-    }
-    cuda_batch_us = (now_seconds() - start) * 1000000.0 /
-        ((double)CRC_BENCH_ITERATIONS * (double)CRC_BENCH_BATCH_BLOCKS);
-
-    printf("%-6s len=%4u host=%8.3f us cuda1=%8.3f us batch_host=%8.3f us batch_cuda=%8.3f us\n",
-        crc_type_name(crctype), input_len, host_us, cuda_device_us,
-        host_batch_us, cuda_batch_us);
-
+    cudaFree(device_out_bits);
     (void)host_crc_sink;
     return 0;
 }

@@ -9,16 +9,6 @@
 
 #include "nr_ldpc.h"
 
-#define CUDA_CHECK_RATE_MATCH(call)                                          \
-    do {                                                                     \
-        cudaError_t cuda_check_status = (call);                              \
-        if (cuda_check_status != cudaSuccess) {                              \
-            fprintf(stderr, "CUDA rate-match error %s:%d: %s\n", __FILE__,   \
-                    __LINE__, cudaGetErrorString(cuda_check_status));        \
-            return;                                                          \
-        }                                                                    \
-    } while (0)
-
 #define CUDA_CHECK_RATE_MATCH_INT(call)                                      \
     do {                                                                     \
         cudaError_t cuda_check_status = (call);                              \
@@ -30,10 +20,8 @@
     } while (0)
 
 typedef struct {
-    uint8_t *inbits;
     uint8_t *ek;
     uint8_t *outbytes;
-    uint32_t inbits_capacity;
     uint32_t ek_capacity;
     uint32_t outbytes_capacity;
 } cuda_rate_match_workspace_t;
@@ -42,18 +30,9 @@ static cuda_rate_match_workspace_t g_rate_match_workspace;
 
 static int cuda_rate_match_ensure_workspace(
     cuda_rate_match_workspace_t *ws,
-    uint32_t in_count,
     uint32_t E,
     uint32_t out_bytes)
 {
-    if (ws->inbits_capacity < in_count) {
-        cudaFree(ws->inbits);
-        ws->inbits = NULL;
-        CUDA_CHECK_RATE_MATCH_INT(cudaMalloc((void **)&ws->inbits,
-            sizeof(uint8_t) * in_count));
-        ws->inbits_capacity = in_count;
-    }
-
     if (ws->ek_capacity < E) {
         cudaFree(ws->ek);
         ws->ek = NULL;
@@ -125,12 +104,13 @@ static __global__ void cuda_rate_match_pack_kernel(
     outbytes[byte_idx] = out;
 }
 
-/*5g ldpc rate matching
-dn: input sequence with size = N
-ek: rat matching output with size = E/8 bytes
-*/
-void nr_ldpc_rate_match(uint8_t *inbits, uint8_t *outbytes,ldpc_config_t *config) {
-    //read parameters from config
+int32_t cuda_nr_ldpc_rate_match_from_device(const uint8_t *device_inbits,
+    uint8_t *outbytes, ldpc_config_t *config)
+{
+    if (device_inbits == NULL || outbytes == NULL || config == NULL) {
+        return -1;
+    }
+
     uint16_t E = config->E;
     uint16_t N = config->N;
     uint16_t k0 = config->k0;
@@ -138,27 +118,24 @@ void nr_ldpc_rate_match(uint8_t *inbits, uint8_t *outbytes,ldpc_config_t *config
     uint16_t B = config->B;
     uint16_t Qm = config->Qm;
     uint16_t K = config->K;
-    uint32_t in_count = (uint32_t)N + 2u * (uint32_t)Zc;
     uint32_t out_bytes = ((uint32_t)E + 7u) / 8u;
     cuda_rate_match_workspace_t *ws = &g_rate_match_workspace;
 
-    if (cuda_rate_match_ensure_workspace(ws, in_count, E, out_bytes) != 0) {
-        return;
+    if (cuda_rate_match_ensure_workspace(ws, E, out_bytes) != 0) {
+        return -1;
     }
 
-    CUDA_CHECK_RATE_MATCH(cudaMemcpy(ws->inbits, inbits, sizeof(uint8_t) * in_count,
-        cudaMemcpyHostToDevice));
-
     cuda_rate_match_select_kernel<<<1, 1>>>(
-        ws->inbits, ws->ek, E, N, k0, Zc, B, K);
-    CUDA_CHECK_RATE_MATCH(cudaGetLastError());
+        device_inbits, ws->ek, E, N, k0, Zc, B, K);
+    CUDA_CHECK_RATE_MATCH_INT(cudaGetLastError());
 
     const int threads = 128;
     cuda_rate_match_pack_kernel<<<(out_bytes + threads - 1) / threads, threads>>>(
         ws->ek, ws->outbytes, E, Qm);
-    CUDA_CHECK_RATE_MATCH(cudaGetLastError());
+    CUDA_CHECK_RATE_MATCH_INT(cudaGetLastError());
 
-    CUDA_CHECK_RATE_MATCH(cudaMemcpy(outbytes, ws->outbytes, sizeof(uint8_t) * out_bytes,
+    CUDA_CHECK_RATE_MATCH_INT(cudaMemcpy(outbytes, ws->outbytes, sizeof(uint8_t) * out_bytes,
         cudaMemcpyDeviceToHost));
 
+    return 0;
 }
