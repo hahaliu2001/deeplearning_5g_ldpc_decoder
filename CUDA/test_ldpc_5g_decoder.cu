@@ -3,9 +3,6 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <limits.h>
-#include <libgen.h>
 #include <dlfcn.h>
 #include <time.h>
 
@@ -13,46 +10,51 @@
 
 #include "nr_ldpc.h"
 
+/*
+ * Runtime CUDA-vs-c_lib decoder smoke test.
+ *
+ * The test generates random transport-block bits, encodes them with the C
+ * reference encoder, sends the rate-matched bits through the shared C channel
+ * model, and then decodes the same LLRs with both CUDA and c_lib. The final
+ * section profiles both decoder entry points on one representative case.
+ */
 #define PROFILE_WARMUP_ITERATIONS 2
 #define PROFILE_ITERATIONS 20
+#define MAX_INFO_BITS 8448
+#define MAX_RM_BYTES (MAX_INFO_BITS * 256)
+#define CHANNEL_SNR_DB 0.0f
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
 #ifndef RTLD_DEEPBIND
 #define RTLD_DEEPBIND 0
 #endif
 
-uint8_t info_bits[8448]; // 
-int16_t LLr[BG1_NUM_COLS*MAX_ZC]; // LLRs for variable nodes, size should match the number of variable nodes in the code
-uint8_t info_bytes[8448/8]; // Size should be ceil(K/8) bytes for storing K bits
-uint8_t cuda_hardbits[8448/8]; // Decoded hardbits, size should be ceil(K/8) bytes for storing K bits
-uint8_t c_hardbits[8448/8]; // Decoded hardbits, size should be ceil(K/8) bytes for storing K bits
-ldpc_in_config_t inconfig;
-ldpc_decoder_cfg_t decoder_config;
+extern "C" int32_t cuda_ldpc_5g_decode(int16_t *LLr, uint8_t *hardbits,
+    ldpc_in_config_t *inconfig, ldpc_decoder_cfg_t *decoder_config);
 
 typedef int32_t (*ldpc_decode_fn_t)(int16_t *LLr, uint8_t *hardbits,
     ldpc_in_config_t *inconfig, ldpc_decoder_cfg_t *decoder_config);
-typedef int (*gen_ldpc_parameters_fn_t)(ldpc_config_t *params,
+typedef int32_t (*ldpc_encode_fn_t)(uint8_t *infobytes, uint8_t *rm_bytes,
     ldpc_in_config_t *inconfig);
-typedef void (*rate_recover_fn_t)(ldpc_config_t *config,
-    int16_t filling_bit_value, int16_t *input_LLr);
-typedef int32_t (*layered_decode_fn_t)(int16_t *LLr, uint8_t *hardbits,
-    ldpc_config_t *config, ldpc_decoder_cfg_t *decoder_cfg);
+typedef int (*tx_rx_process_fn_t)(const uint8_t *inbytes, size_t num_bits,
+    uint16_t Qm, float noise_power_db, int16_t *llr_out);
 
+// c_lib is loaded dynamically so this CUDA-linked executable can compare
+// against the independently built C shared library.
 typedef struct {
     ldpc_decode_fn_t top_decode;
-    gen_ldpc_parameters_fn_t gen_params;
-    rate_recover_fn_t rate_recover;
-    layered_decode_fn_t layered_minsum;
-    layered_decode_fn_t layered_degree;
-    int16_t *harq_memory;
-} decoder_api_t;
+    ldpc_encode_fn_t top_encode;
+    tx_rx_process_fn_t tx_rx_process;
+} c_lib_api_t;
 
-typedef struct {
-    double gen_params_ms;
-    double rate_recover_ms;
-    double ldpc_decode_ms;
-    double total_ms;
-    int32_t status;
-} decoder_profile_t;
+// Static buffers keep the test simple and avoid allocation noise in timing.
+static uint8_t g_info_bytes[MAX_INFO_BITS / 8];
+static uint8_t g_encoded_bytes[MAX_RM_BYTES];
+static int16_t g_channel_llr[BG1_NUM_COLS * MAX_ZC];
+static uint8_t g_cuda_hardbits[MAX_INFO_BITS / 8];
+static uint8_t g_c_hardbits[MAX_INFO_BITS / 8];
+static ldpc_in_config_t g_inconfig;
+static ldpc_decoder_cfg_t g_decoder_config;
 
 static double now_seconds()
 {
@@ -61,23 +63,72 @@ static double now_seconds()
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+// Decode functions append/shift hard bits into this buffer, so always clear it.
 static void clear_hardbits(uint8_t *buffer)
 {
-    memset(buffer, 0, sizeof(cuda_hardbits));
+    memset(buffer, 0, sizeof(g_cuda_hardbits));
 }
 
-static layered_decode_fn_t select_layered_decoder(const decoder_api_t *api)
+// Generate MSB-first packed random information bits, matching numpy.packbits().
+static void generate_info_bytes(const ldpc_in_config_t *config)
 {
-    if (decoder_config.algo == 1) {
-        return api->layered_minsum;
+    size_t num_bytes = ((size_t)config->A + 7u) / 8u;
+
+    memset(g_info_bytes, 0, sizeof(g_info_bytes));
+    for (uint16_t i = 0; i < config->A; i++) {
+        uint8_t bit = (uint8_t)(rand() & 0x01);
+        uint16_t byte_idx = i / 8u;
+        uint16_t bit_pos = 7u - (i % 8u);
+
+        g_info_bytes[byte_idx] |= (uint8_t)(bit << bit_pos);
     }
-    if (decoder_config.algo == 3) {
-        return api->layered_degree;
+
+    if (num_bytes < sizeof(g_info_bytes)) {
+        memset(g_info_bytes + num_bytes, 0,
+            sizeof(g_info_bytes) - num_bytes);
     }
-    return NULL;
 }
 
-static int load_c_lib_decoder(void **handle, decoder_api_t *api)
+// Read one bit from an MSB-first packed byte array.
+static uint8_t get_packed_bit(const uint8_t *bytes, uint16_t bit_idx)
+{
+    uint16_t byte_idx = bit_idx / 8u;
+    uint8_t bit_pos = (uint8_t)(7u - (bit_idx % 8u));
+    return (uint8_t)((bytes[byte_idx] >> bit_pos) & 0x01u);
+}
+
+// Compare only the transport-block payload. CRC bits are checked by decoder CRC.
+static int verify_payload_bits(const uint8_t *decoded,
+    const ldpc_in_config_t *config)
+{
+    for (uint16_t bit = 0; bit < config->A; bit++) {
+        if (get_packed_bit(decoded, bit) != get_packed_bit(g_info_bytes, bit)) {
+            fprintf(stderr, "Payload mismatch at bit %u\n", bit);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Keep this aligned with scripts/*_ldpc_encoder_decoder.py min-sum settings.
+static void init_decoder_config(uint16_t algo)
+{
+    g_decoder_config.algo = algo;
+    g_decoder_config.max_iterations = 32;
+    g_decoder_config.alpha = 22936;
+    g_decoder_config.beta = 0;
+    g_decoder_config.filling_bit_value = 128 * 10;
+    g_decoder_config.max_llr = 32767;
+    g_decoder_config.min_llr = -32767;
+}
+
+static uint16_t crc_len_bits(uint16_t crctype)
+{
+    return (crctype == 0) ? 16u : 24u;
+}
+
+// Load the C reference encode/decode/channel symbols from common build paths.
+static int load_c_lib(void **handle, c_lib_api_t *api)
 {
     const char *candidates[] = {
         "c_lib/libnrLDPC.so",
@@ -86,7 +137,7 @@ static int load_c_lib_decoder(void **handle, decoder_api_t *api)
     };
 
     *handle = NULL;
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+    for (size_t i = 0; i < ARRAY_SIZE(candidates); i++) {
         *handle = dlopen(candidates[i], RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
         if (*handle != NULL) {
             break;
@@ -99,19 +150,13 @@ static int load_c_lib_decoder(void **handle, decoder_api_t *api)
     }
 
     api->top_decode = (ldpc_decode_fn_t)dlsym(*handle, "c_ldpc_5g_decode");
-    api->gen_params = (gen_ldpc_parameters_fn_t)dlsym(*handle, "gen_ldpc_parameters");
-    api->rate_recover = (rate_recover_fn_t)dlsym(*handle,
-        "nr_ldpc_rate_recover_harq_combine");
-    api->layered_minsum = (layered_decode_fn_t)dlsym(*handle,
-        "layered_minsum_ldpc_decode");
-    api->layered_degree = (layered_decode_fn_t)dlsym(*handle,
-        "layered_degree_minsum_ldpc_decode");
-    api->harq_memory = (int16_t *)dlsym(*handle, "HARQ_memory");
+    api->top_encode = (ldpc_encode_fn_t)dlsym(*handle, "c_ldpc_5g_encode");
+    api->tx_rx_process =
+        (tx_rx_process_fn_t)dlsym(*handle, "tx_rx_process");
 
-    if (api->top_decode == NULL || api->gen_params == NULL ||
-            api->rate_recover == NULL || select_layered_decoder(api) == NULL ||
-            api->harq_memory == NULL) {
-        fprintf(stderr, "Failed to load one or more c_lib decoder symbols\n");
+    if (api->top_decode == NULL || api->top_encode == NULL ||
+            api->tx_rx_process == NULL) {
+        fprintf(stderr, "Failed to load one or more c_lib symbols\n");
         dlclose(*handle);
         *handle = NULL;
         return 1;
@@ -120,257 +165,213 @@ static int load_c_lib_decoder(void **handle, decoder_api_t *api)
     return 0;
 }
 
-static double profile_decoder(const char *name, ldpc_decode_fn_t decode_fn,
-    uint8_t *out_bits, int32_t *decode_status)
+/*
+ * Build one channel realization:
+ *   random payload -> c_lib encoder -> C tx_rx_process -> int16 LLRs.
+ *
+ * tx_rx_process takes noise_power_db, not SNR. For normalized symbols and
+ * Qm=1, SNR 10 dB corresponds to noise power -10 dB. Higher Qm tests should
+ * include the same Qm adjustment used in the Python simulation.
+ */
+static int generate_channel_llrs(const c_lib_api_t *api,
+    const ldpc_in_config_t *config)
 {
-    int32_t result = 0;
+    float noise_power_db = -CHANNEL_SNR_DB;
+
+    generate_info_bytes(config);
+    memset(g_encoded_bytes, 0, sizeof(g_encoded_bytes));
+    memset(g_channel_llr, 0, sizeof(g_channel_llr));
+
+    int32_t status = api->top_encode(g_info_bytes, g_encoded_bytes,
+        (ldpc_in_config_t *)config);
+    if (status != 0) {
+        fprintf(stderr,
+            "c_lib encoder failed: bgn=%u A=%u crc=%u E=%u rv=%u Qm=%u status=%d\n",
+            config->bgn, config->A, config->crctype, config->E, config->rv,
+            config->Qm, status);
+        return 1;
+    }
+
+    status = api->tx_rx_process(g_encoded_bytes, config->E, config->Qm,
+        noise_power_db, g_channel_llr);
+    if (status != 0) {
+        fprintf(stderr,
+            "tx_rx_process failed: bgn=%u A=%u E=%u Qm=%u status=%d\n",
+            config->bgn, config->A, config->E, config->Qm, status);
+        return 1;
+    }
+
+    return 0;
+}
+
+// Run one decoder entry point on the current global LLR/config buffers.
+static int32_t run_decode_once(ldpc_decode_fn_t decode_fn, uint8_t *hardbits,
+    int need_cuda_sync)
+{
+    clear_hardbits(hardbits);
+    int32_t status = decode_fn(g_channel_llr, hardbits, &g_inconfig,
+        &g_decoder_config);
+    if (need_cuda_sync) {
+        cudaDeviceSynchronize();
+    }
+    return status;
+}
+
+// Decode one generated block with both implementations and compare outputs.
+static int run_one_case(const c_lib_api_t *api,
+    const ldpc_in_config_t *config)
+{
+    size_t hardbit_bytes;
+
+    g_inconfig = *config;
+    srand(1000u + (uint32_t)config->A + (uint32_t)config->E +
+        (uint32_t)config->Qm * 17u);
+
+    if (generate_channel_llrs(api, &g_inconfig) != 0) {
+        return 1;
+    }
+
+    // Run c_lib first so a CUDA failure cannot hide the reference result.
+    int32_t c_status = run_decode_once(api->top_decode, g_c_hardbits, 0);
+    int32_t cuda_status = run_decode_once(cuda_ldpc_5g_decode,
+        g_cuda_hardbits, 1);
+    if (cuda_status != 0 || c_status != 0) {
+        fprintf(stderr,
+            "Decoder failed: bgn=%u A=%u crc=%u E=%u rv=%u Qm=%u CUDA=%d c_lib=%d\n",
+            config->bgn, config->A, config->crctype, config->E, config->rv,
+            config->Qm, cuda_status, c_status);
+        return 1;
+    }
+
+    hardbit_bytes = ((size_t)config->A + crc_len_bits(config->crctype) + 7u) /
+        8u;
+    if (memcmp(g_cuda_hardbits, g_c_hardbits, hardbit_bytes) != 0) {
+        fprintf(stderr,
+            "CUDA/c_lib hardbit mismatch: bgn=%u A=%u crc=%u E=%u rv=%u Qm=%u\n",
+            config->bgn, config->A, config->crctype, config->E, config->rv,
+            config->Qm);
+        return 1;
+    }
+
+    if (verify_payload_bits(g_cuda_hardbits, config) != 0) {
+        fprintf(stderr,
+            "Decoded payload mismatch: bgn=%u A=%u crc=%u E=%u rv=%u Qm=%u\n",
+            config->bgn, config->A, config->crctype, config->E, config->rv,
+            config->Qm);
+        return 1;
+    }
+
+    printf("decoded bgn=%u A=%u crc=%u E=%u rv=%u Qm=%u at SNR %.1f dB\n",
+        config->bgn, config->A, config->crctype, config->E, config->rv,
+        config->Qm, CHANNEL_SNR_DB);
+    return 0;
+}
+
+// Measure average decoder latency. CUDA timing includes explicit synchronization.
+static double profile_decoder(const char *name, ldpc_decode_fn_t decode_fn,
+    uint8_t *hardbits, int need_cuda_sync, int32_t *decode_status)
+{
+    int32_t status = 0;
 
     for (int i = 0; i < PROFILE_WARMUP_ITERATIONS; i++) {
-        clear_hardbits(out_bits);
-        result = decode_fn(LLr, out_bits, &inconfig, &decoder_config);
-        if (result < 0) {
-            fprintf(stderr, "%s warmup failed with status %d\n", name, result);
-            *decode_status = result;
-            return -1.0;
-        }
-        if (strcmp(name, "CUDA") == 0) {
+        clear_hardbits(hardbits);
+        status = decode_fn(g_channel_llr, hardbits, &g_inconfig,
+            &g_decoder_config);
+        if (need_cuda_sync) {
             cudaDeviceSynchronize();
+        }
+        if (status < 0) {
+            fprintf(stderr, "%s warmup failed with status %d\n", name, status);
+            *decode_status = status;
+            return -1.0;
         }
     }
 
     double start = now_seconds();
     for (int i = 0; i < PROFILE_ITERATIONS; i++) {
-        clear_hardbits(out_bits);
-        result = decode_fn(LLr, out_bits, &inconfig, &decoder_config);
-        if (result < 0) {
-            fprintf(stderr, "%s profiling failed with status %d\n", name, result);
-            *decode_status = result;
-            return -1.0;
-        }
-        if (strcmp(name, "CUDA") == 0) {
+        clear_hardbits(hardbits);
+        status = decode_fn(g_channel_llr, hardbits, &g_inconfig,
+            &g_decoder_config);
+        if (need_cuda_sync) {
             cudaDeviceSynchronize();
+        }
+        if (status < 0) {
+            fprintf(stderr, "%s profiling failed with status %d\n", name,
+                status);
+            *decode_status = status;
+            return -1.0;
         }
     }
     double elapsed = now_seconds() - start;
 
-    *decode_status = result;
+    *decode_status = status;
     return elapsed * 1000.0 / (double)PROFILE_ITERATIONS;
 }
 
-static int profiled_decode_once(const decoder_api_t *api, uint8_t *out_bits,
-    decoder_profile_t *profile)
+int main()
 {
-    ldpc_config_t ldpc_config;
-    layered_decode_fn_t layered_decode = select_layered_decoder(api);
-    double t0;
-
-    if (layered_decode == NULL) {
-        return -3;
-    }
-
-    t0 = now_seconds();
-    if (api->gen_params(&ldpc_config, &inconfig) != 0) {
-        return -2;
-    }
-    profile->gen_params_ms += now_seconds() - t0;
-
-    t0 = now_seconds();
-    api->rate_recover(&ldpc_config, decoder_config.filling_bit_value, LLr);
-    profile->rate_recover_ms += now_seconds() - t0;
-
-    t0 = now_seconds();
-    profile->status = layered_decode(api->harq_memory, out_bits, &ldpc_config,
-        &decoder_config);
-    profile->ldpc_decode_ms += now_seconds() - t0;
-
-    return profile->status;
-}
-
-static int profile_decoder_stages(const char *name, const decoder_api_t *api,
-    uint8_t *out_bits, decoder_profile_t *profile)
-{
-    memset(profile, 0, sizeof(*profile));
-    profile->status = 1;
-
-    for (int i = 0; i < PROFILE_WARMUP_ITERATIONS; i++) {
-        decoder_profile_t warmup_profile;
-        memset(&warmup_profile, 0, sizeof(warmup_profile));
-        clear_hardbits(out_bits);
-        profiled_decode_once(api, out_bits, &warmup_profile);
-        if (strcmp(name, "CUDA") == 0) {
-            cudaDeviceSynchronize();
-        }
-    }
-
-    double start = now_seconds();
-    for (int i = 0; i < PROFILE_ITERATIONS; i++) {
-        clear_hardbits(out_bits);
-        profiled_decode_once(api, out_bits, profile);
-        if (strcmp(name, "CUDA") == 0) {
-            cudaDeviceSynchronize();
-        }
-    }
-    profile->total_ms = now_seconds() - start;
-
-    profile->gen_params_ms *= 1000.0 / (double)PROFILE_ITERATIONS;
-    profile->rate_recover_ms *= 1000.0 / (double)PROFILE_ITERATIONS;
-    profile->ldpc_decode_ms *= 1000.0 / (double)PROFILE_ITERATIONS;
-    profile->total_ms *= 1000.0 / (double)PROFILE_ITERATIONS;
-
-    return 0;
-}
-
-static void print_stage_profile(const char *name, const decoder_profile_t *p)
-{
-    printf("%s staged timing average:\n", name);
-    printf("  gen params:   %.6f ms\n", p->gen_params_ms);
-    printf("  rate recover: %.6f ms\n", p->rate_recover_ms);
-    printf("  LDPC decode:  %.6f ms\n", p->ldpc_decode_ms);
-    printf("  total:        %.6f ms\n", p->total_ms);
-    printf("  final status: %d\n", p->status);
-}
-
-int32_t load_test1_testdata_from_binary_file() {
-    char cwd[PATH_MAX];
-    char prefolder[PATH_MAX]; // Define it here so it exists for the whole function
-    char full_path[PATH_MAX+64];
-
-    if (getcwd(cwd, sizeof(cwd)) != NULL) {
-        // basename() extracts the folder name from the full path
-        char *folder_name = basename(cwd);
-
-        if (strcmp(folder_name, "c_lib") == 0) {
-            printf("Confirmed: You are inside the 'c_lib' folder.\n");
-            strcpy(prefolder, "../out/"); 
-        } else {
-            printf("Notice: Current folder is '%s', not 'c_lib'.\n", folder_name);
-            strcpy(prefolder, "out/");
-        }
-    } else {
-        perror("getcwd() error");
-        return 1;
-    }
-
-    // Load LLRs from binary file
-    snprintf(full_path, sizeof(full_path), "%sLLR_bits.bin", prefolder);
-    FILE *f = fopen(full_path, "rb");
-    if (f == NULL) {
-        perror("Failed to open LLR_bits.bin");
-        return 1;
-    }
-    fread(LLr, sizeof(int16_t), sizeof(LLr) / sizeof(LLr[0]), f); // Read LLR values
-    fclose(f);
-    
-    //load info bits from binary file for testing
-    snprintf(full_path, sizeof(full_path), "%sinfo_bits.bin", prefolder);
-    f = fopen(full_path, "rb");
-    if (f == NULL) {
-        perror("Failed to open info_bits.bin");
-        return 1;
-    }
-    fread(info_bits, sizeof(uint8_t), sizeof(info_bits), f); // Read ceil(K/8) bytes of info bits
-    fclose(f);
-    
-    //load info bytes from binary file for testing
-    snprintf(full_path, sizeof(full_path), "%sinfo_bytes.bin", prefolder);
-    f = fopen(full_path, "rb");
-    if (f == NULL) {
-        perror("Failed to open info_bytes.bin");
-        return 1;
-    }
-    fread(info_bytes, sizeof(uint8_t), sizeof(info_bytes), f); // Read ceil(K/8) bytes of info bytes
-    fclose(f);
-
-    inconfig.A = 512-24;
-    inconfig.bgn = 1;
-    inconfig.crctype = 1; // crc24a
-    inconfig.E = 512*3;
-    inconfig.rv = 0;
-    inconfig.Qm = 1; // BPSK
-    inconfig.HARQ_on = 0;
-
-    decoder_config.algo = 3; // 3 for degree-based min-sum CUDA kernel path
-    decoder_config.max_iterations = 32;
-    decoder_config.alpha = 32767; // Scaling factor for normalized min-sum approximation, scaled by 32767 for fixed-point representation
-    decoder_config.beta = 0 * 32767; // Offset for offset min-sum approximation, scaled by 32767 for fixed-point representation
-    decoder_config.filling_bit_value = 128*20; // the LLR value for filling bits in rate recovery, which can be set to 0 for HARQ combining
-    decoder_config.max_llr = 32767; // the maximum LLR value for input to LDPC decoder, which is set to 127 for int8 implementation in C
-    decoder_config.min_llr = -32768; // the minimum LLR value for input to LDPC decoder, which is set to -128 for int8 implementation in C
-
-    return 0;
-
-}
-
-int main() {
-    // read LLRs and info bits from binary files for testing C implementation
-    int32_t status = load_test1_testdata_from_binary_file();
-    if (status != 0) {
-        fprintf(stderr, "Failed to load test data from binary files\n");
-        return 1;
-    }
-
-    void *c_lib_handle = NULL;
-    decoder_api_t cuda_api = {
-        c_ldpc_5g_decode,
-        gen_ldpc_parameters,
-        nr_ldpc_rate_recover_harq_combine,
-        layered_minsum_ldpc_decode,
-        layered_degree_minsum_ldpc_decode,
-        HARQ_memory
+    /*
+     * Cases are intentionally rv=0 and conservative rates. More aggressive
+     * modulation/rate combinations can be legitimate channel failures for both
+     * implementations, which makes them poor smoke-test comparisons.
+     */
+    const ldpc_in_config_t cases[] = {
+        {1, 488, 1, 1536, 0, 1, 0},
+        {1, 1024, 0, 3072, 0, 1, 0},
+        {1, 2400, 2, 8192, 0, 1, 0},
+        {1, 4096-24, 1, 16384, 0, 1, 0},
+        {2, 176, 1, 512, 0, 1, 0},
+        {2, 640, 3, 2048, 0, 1, 0},
+        {2, 1200, 0, 4096, 0, 1, 0},
+        {2, 2400, 2, 8192, 0, 1, 0},
     };
-    decoder_api_t c_lib_api;
+    void *c_lib_handle = NULL;
+    c_lib_api_t c_lib_api;
     memset(&c_lib_api, 0, sizeof(c_lib_api));
 
-    if (load_c_lib_decoder(&c_lib_handle, &c_lib_api) != 0) {
+    init_decoder_config(1);
+
+    if (load_c_lib(&c_lib_handle, &c_lib_api) != 0) {
+        return 1;
+    }
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        if (run_one_case(&c_lib_api, &cases[i]) != 0) {
+            dlclose(c_lib_handle);
+            return 1;
+        }
+    }
+
+    g_inconfig = cases[3];
+    srand(2000u);
+    if (generate_channel_llrs(&c_lib_api, &g_inconfig) != 0) {
+        dlclose(c_lib_handle);
         return 1;
     }
 
     int32_t cuda_status = 1;
     int32_t c_status = 1;
-    double cuda_avg_ms = profile_decoder("CUDA", c_ldpc_5g_decode,
-        cuda_hardbits, &cuda_status);
+    double cuda_avg_ms = profile_decoder("CUDA", cuda_ldpc_5g_decode,
+        g_cuda_hardbits, 1, &cuda_status);
     double c_avg_ms = profile_decoder("c_lib", c_lib_api.top_decode,
-        c_hardbits, &c_status);
+        g_c_hardbits, 0, &c_status);
 
     if (cuda_avg_ms < 0.0 || c_avg_ms < 0.0) {
         dlclose(c_lib_handle);
         return 1;
     }
 
-    ldpc_config_t ldpc_config;
-    if (gen_ldpc_parameters(&ldpc_config, &inconfig) != 0) {
-        dlclose(c_lib_handle);
-        return 1;
-    }
-    size_t hardbit_bytes = ((size_t)ldpc_config.B + 7u) / 8u;
-    if (memcmp(cuda_hardbits, c_hardbits, hardbit_bytes) != 0) {
-        fprintf(stderr, "CUDA and c_lib decoder hardbits differ!\n");
-        dlclose(c_lib_handle);
-        return 1;
-    }
-
-    decoder_profile_t cuda_profile;
-    decoder_profile_t c_profile;
-    profile_decoder_stages("CUDA", &cuda_api, cuda_hardbits, &cuda_profile);
-    profile_decoder_stages("c_lib", &c_lib_api, c_hardbits, &c_profile);
-
-    if (memcmp(cuda_hardbits, c_hardbits, hardbit_bytes) != 0) {
-        fprintf(stderr, "CUDA and c_lib staged decoder hardbits differ!\n");
-        dlclose(c_lib_handle);
-        return 1;
-    }
-
-    printf("LDPC decoder timing over %d iterations after %d warmup runs\n",
+    printf("LDPC decoder timing for bgn=%u A=%u E=%u rv=%u Qm=%u "
+        "algo=%u SNR=%.1f dB over %d iterations after %d warmup runs\n",
+        g_inconfig.bgn, g_inconfig.A, g_inconfig.E, g_inconfig.rv,
+        g_inconfig.Qm, g_decoder_config.algo, CHANNEL_SNR_DB,
         PROFILE_ITERATIONS, PROFILE_WARMUP_ITERATIONS);
-    printf("Decoder algorithm: %u\n", decoder_config.algo);
-    printf("CUDA decoder average: %.6f ms, status %d\n",
-        cuda_avg_ms, cuda_status);
-    printf("c_lib decoder average: %.6f ms, status %d\n",
-        c_avg_ms, c_status);
+    printf("CUDA decoder average: %.6f ms, status %d\n", cuda_avg_ms,
+        cuda_status);
+    printf("c_lib decoder average: %.6f ms, status %d\n", c_avg_ms,
+        c_status);
     printf("Speedup CUDA/c_lib: %.3fx\n", c_avg_ms / cuda_avg_ms);
-    printf("Output compare: matched %zu hardbit bytes\n", hardbit_bytes);
-    print_stage_profile("CUDA", &cuda_profile);
-    print_stage_profile("c_lib", &c_profile);
+    printf("All CUDA 5G LDPC decoder tests passed\n");
 
     dlclose(c_lib_handle);
     return 0;

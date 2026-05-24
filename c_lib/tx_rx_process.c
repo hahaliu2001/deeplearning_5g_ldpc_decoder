@@ -21,15 +21,18 @@ static float bit_sign(uint8_t bit) {
     return bit ? -1.0f : 1.0f;
 }
 
-// Scale float LLRs by 128 and clip them to the decoder's int16_t range.
+// Scale float LLRs by 128 and clip to a practical channel-LLR range. Very high
+// SNR can otherwise saturate most samples to INT16_MAX/INT16_MIN, which makes
+// the fixed-point LDPC decoder overconfident around punctured bits.
 static int16_t quantize_llr_to_int16(float llr) {
+    const int32_t max_channel_llr = 10000;
     float scaled = llr * 128.0f;
     int32_t quantized = (int32_t)(scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
 
-    if (quantized > INT16_MAX) {
-        quantized = INT16_MAX;
-    } else if (quantized < INT16_MIN) {
-        quantized = INT16_MIN;
+    if (quantized > max_channel_llr) {
+        quantized = max_channel_llr;
+    } else if (quantized < -max_channel_llr) {
+        quantized = -max_channel_llr;
     }
 
     return (int16_t)quantized;

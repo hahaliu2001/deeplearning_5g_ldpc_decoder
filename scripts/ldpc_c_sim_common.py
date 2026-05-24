@@ -11,6 +11,7 @@ from numpy.ctypeslib import ndpointer
 
 
 LIB_PATH = os.path.abspath("c_lib/libnrLDPC.so")
+CUDA_LIB_PATH = os.path.abspath("CUDA/libnrLDPC_cuda.so")
 
 
 class LdpcInConfig(ctypes.Structure):
@@ -37,33 +38,54 @@ class DecoderConfig(ctypes.Structure):
     ]
 
 
-def load_c_library(lib_path=LIB_PATH):
-    """Load libnrLDPC.so and register ctypes signatures."""
-    lib = ctypes.CDLL(lib_path)
+def load_c_library(
+    lib_path=LIB_PATH,
+    encode_symbol="c_ldpc_5g_encode",
+    decode_symbol="c_ldpc_5g_decode",
+    channel_lib_path=None,
+):
+    """Load an LDPC library and register ctypes signatures.
 
-    lib.c_ldpc_5g_encode.argtypes = [
+    encode_symbol/decode_symbol let CUDA simulations reuse the same BLER
+    harness with cuda_ldpc_5g_encode/cuda_ldpc_5g_decode. tx_rx_process lives
+    in the C library, so channel_lib_path can point there when lib_path is the
+    CUDA shared object.
+    """
+    lib = ctypes.CDLL(lib_path)
+    channel_lib = lib if channel_lib_path is None else ctypes.CDLL(channel_lib_path)
+
+    encode_fn = getattr(lib, encode_symbol)
+    encode_fn.argtypes = [
         ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS"),
         ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS"),
         ctypes.POINTER(LdpcInConfig),
     ]
-    lib.c_ldpc_5g_encode.restype = ctypes.c_int32
+    encode_fn.restype = ctypes.c_int32
+    lib.ldpc_5g_encode = encode_fn
 
-    lib.tx_rx_process.argtypes = [
+    tx_rx_process = channel_lib.tx_rx_process
+    tx_rx_process.argtypes = [
         ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS"),
         ctypes.c_size_t,
         ctypes.c_uint16,
         ctypes.c_float,
         ndpointer(dtype=np.int16, flags="C_CONTIGUOUS"),
     ]
-    lib.tx_rx_process.restype = ctypes.c_int32
+    tx_rx_process.restype = ctypes.c_int32
+    lib.tx_rx_process_fn = tx_rx_process
 
-    lib.c_ldpc_5g_decode.argtypes = [
+    decode_fn = getattr(lib, decode_symbol)
+    decode_fn.argtypes = [
         ndpointer(dtype=np.int16, flags="C_CONTIGUOUS"),
         ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS"),
         ctypes.POINTER(LdpcInConfig),
         ctypes.POINTER(DecoderConfig),
     ]
-    lib.c_ldpc_5g_decode.restype = ctypes.c_int32
+    decode_fn.restype = ctypes.c_int32
+    lib.ldpc_5g_decode = decode_fn
+
+    # Keep the channel library alive when it is a separate CDLL.
+    lib._channel_lib = channel_lib
 
     return lib
 
@@ -131,14 +153,14 @@ def run_ldpc_trial(libnrLDPC, ldpc_config, decoder_config_list, noise_power_db):
     info_bytes = np.packbits(info_bits, bitorder="big")
 
     encoded_bytes = np.zeros((ldpc_config.E + 7) // 8, dtype=np.uint8)
-    status = libnrLDPC.c_ldpc_5g_encode(
+    status = libnrLDPC.ldpc_5g_encode(
         info_bytes, encoded_bytes, ctypes.byref(ldpc_config)
     )
     if status != 0:
-        raise RuntimeError(f"c_ldpc_5g_encode failed with status {status}")
+        raise RuntimeError(f"LDPC encode failed with status {status}")
 
     llr_int16 = np.zeros(ldpc_config.E, dtype=np.int16)
-    status = libnrLDPC.tx_rx_process(
+    status = libnrLDPC.tx_rx_process_fn(
         encoded_bytes,
         ldpc_config.E,
         ldpc_config.Qm,
@@ -158,7 +180,7 @@ def run_ldpc_trial(libnrLDPC, ldpc_config, decoder_config_list, noise_power_db):
         # the buffer before each algorithm uses the shared channel realization.
         hardbits.fill(0)
         decoder_config = make_decoder_config(config_values)
-        status = libnrLDPC.c_ldpc_5g_decode(
+        status = libnrLDPC.ldpc_5g_decode(
             llr_int16, hardbits, ctypes.byref(ldpc_config), ctypes.byref(decoder_config)
         )
         decoded_bits = np.unpackbits(hardbits, bitorder="big")[:ldpc_config.A]
@@ -201,9 +223,15 @@ def run_bler_sweep(libnrLDPC, ldpc_config, coderate, decoder_config_list,
 
 
 def run_simulation(config_grid, decoder_config_list, snr_power_db_list, test_num,
-    result_file, lib_path=LIB_PATH):
+    result_file, lib_path=LIB_PATH, encode_symbol="c_ldpc_5g_encode",
+    decode_symbol="c_ldpc_5g_decode", channel_lib_path=None):
     """Run a full BLER/BER simulation and save results to a pickle file."""
-    libnrLDPC = load_c_library(lib_path)
+    libnrLDPC = load_c_library(
+        lib_path,
+        encode_symbol=encode_symbol,
+        decode_symbol=decode_symbol,
+        channel_lib_path=channel_lib_path,
+    )
     print(f"Generated {len(config_grid)} configurations.")
 
     test_result = []

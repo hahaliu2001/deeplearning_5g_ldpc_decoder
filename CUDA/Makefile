@@ -20,9 +20,9 @@ SRCS = nr_crc_tables.cu \
        ldpc_internal.cu \
        ldpc_rate_recovery.cu \
        fixedpoint_ldpc_decoder.cu \
-       degree_fixedpoint_ldpc_decoder.cu \
-       c_ldpc_5g_decoder.cu \
-       c_ldpc_5g_encoder.cu \
+       floatpoint_ldpc_decoder.cu \
+       cuda_ldpc_5g_decoder.cu \
+       cuda_ldpc_5g_encoder.cu \
        ldpc_rate_match.cu \
        ldpc_encoder.cu
 

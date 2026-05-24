@@ -21,6 +21,9 @@ static uint8_t g_cuda_rmbytes[MAX_RM_BYTES];
 static uint8_t g_c_rmbytes[MAX_RM_BYTES];
 static ldpc_in_config_t g_inconfig;
 
+extern "C" int32_t cuda_ldpc_5g_encode(uint8_t *infobytes, uint8_t *rm_bytes,
+    ldpc_in_config_t *inconfig);
+
 typedef int32_t (*ldpc_encode_fn_t)(uint8_t *infobytes, uint8_t *rm_bytes,
     ldpc_in_config_t *inconfig);
 
@@ -152,7 +155,7 @@ static int run_one_case(const encoder_api_t *c_lib_api,
     clear_output(g_cuda_rmbytes, rm_bytes_len);
     clear_output(g_c_rmbytes, rm_bytes_len);
 
-    int32_t cuda_status = c_ldpc_5g_encode(g_info_bytes, g_cuda_rmbytes,
+    int32_t cuda_status = cuda_ldpc_5g_encode(g_info_bytes, g_cuda_rmbytes,
         &g_inconfig);
     if (cuda_status != 0) {
         fprintf(stderr,
@@ -231,7 +234,7 @@ int main() {
      */
     g_inconfig = cases[3];
     generate_info_bytes(&g_inconfig);
-    double cuda_avg_ms = profile_encoder("CUDA", c_ldpc_5g_encode,
+    double cuda_avg_ms = profile_encoder("CUDA", cuda_ldpc_5g_encode,
         g_cuda_rmbytes, 1);
     double c_avg_ms = profile_encoder("c_lib", c_lib_api.top_encode,
         g_c_rmbytes, 0);

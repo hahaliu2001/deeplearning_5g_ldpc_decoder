@@ -43,8 +43,9 @@ static int32_t cuda_ldpc_5g_encode_ensure_workspace(
     return 0;
 }
 
-/********* LDPC Decoder Main Function *********/
-int32_t c_ldpc_5g_encode(uint8_t *infobytes, uint8_t *rm_bytes, ldpc_in_config_t *inconfig) {
+/********* LDPC Encoder Main Function *********/
+extern "C" int32_t cuda_ldpc_5g_encode(uint8_t *infobytes, uint8_t *rm_bytes,
+    ldpc_in_config_t *inconfig) {
     ldpc_config_t ldpc_config;
 
     //first generate the ldpc parameters based on the input configuration, which will be used for rate recovery and LDPC decoding
