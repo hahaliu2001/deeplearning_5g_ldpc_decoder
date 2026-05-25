@@ -24,17 +24,19 @@ from py5gphy.ldpc_utils import tx_rx_process
 
 RESULT_FILE = Path("out/py_ldpc_decoder_result.pkl")
 
-# LDPC test grid. make_config_grid() expands these lists into a Cartesian
-# product, so each extra value here adds another group of simulation cases.
-Qm_LIST = [1]
+# LDPC test grid. make_config_grid() expands these lists into independent
+# sweep points with tuple order: Qm, rv, B, coderate, bgn, crctype.
+Qm_LIST = [2]
 RV_LIST = [0]
-B_LIST = [256, 640, 1280]
-CODERATE_LIST = [1 / 3, 1/4]
+B_LIST = [640]
+CODERATE_LIST = [1 / 3]
 BGN_LIST = [1]
 CRCTYPE_LIST = [1]
 
-# Channel sweep and Monte Carlo settings.
-SNR_POWER_DB_LIST = np.arange(-5, -1, 0.5)
+# Channel sweep and Monte Carlo settings. The pure-Python path is useful as a
+# reference implementation, but each extra SNR or trial can be noticeably slow.
+# noise_power_db = -snr_power_db - 10 * np.log10(ldpc_config["Qm"])
+SNR_POWER_DB_LIST = np.arange(-2, -1, 0.5) 
 TEST_NUM = 100
 
 # Keep the same numeric CRC IDs as the C simulation and map them to the Python
@@ -67,6 +69,8 @@ def make_ldpc_config(Qm, rv, B, coderate, bgn, crctype):
     if crctype not in CRC_POLY_BY_TYPE:
         raise ValueError(f"unsupported CRC type {crctype}")
 
+    # Keep the same A/B/E derivation as the C simulation so Python, C, and CUDA
+    # sweeps can be compared from the saved pickle files.
     crc_len = 16 if crctype == 0 else 24
     return {
         "Qm": Qm,
@@ -87,6 +91,8 @@ def run_ldpc_trial(ldpc_config, decoder_config_list, noise_power_db):
     Returns block-error flags and information-bit error counts for each decoder.
     A block-error flag of 1 means decoding failed, and 0 means success.
     """
+    # Generate a new payload for each Monte Carlo trial; all decoder configs
+    # below decode the same received LLRs for a fair comparison.
     info_bits = np.random.randint(0, 2, size=ldpc_config["A"])
     codeword = cb_ldpc_5g_encode(
         info_bits=info_bits,
@@ -194,6 +200,8 @@ def run_simulation(
 
 
 def main():
+    # Build the grid with the same helper used by the C/CUDA scripts so all
+    # three entry points reject unsupported combinations consistently.
     config_grid = make_config_grid(
         Qm_LIST, RV_LIST, B_LIST, CODERATE_LIST, BGN_LIST, CRCTYPE_LIST
     )

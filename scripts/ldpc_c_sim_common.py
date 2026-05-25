@@ -5,6 +5,7 @@ import ctypes
 import itertools
 import os
 import pickle
+import warnings
 
 import numpy as np
 from numpy.ctypeslib import ndpointer
@@ -13,8 +14,24 @@ from numpy.ctypeslib import ndpointer
 LIB_PATH = os.path.abspath("c_lib/libnrLDPC.so")
 CUDA_LIB_PATH = os.path.abspath("CUDA/libnrLDPC_cuda.so")
 
+# Values accepted by the C/CUDA LDPC entry points. Filtering them here catches
+# bad sweep inputs before a long simulation reaches ctypes or device code.
+VALID_QM = {1, 2, 4, 6, 8}
+VALID_RV = {0, 1, 2, 3}
+VALID_BGN = {1, 2}
+VALID_CRCTYPE = {0, 1, 2, 3}
+
+# B is the information block length after transport-block CRC attachment. This
+# repository simulates one code block at a time, so BG1/BG2 have fixed max B.
+MAX_B_BY_BGN = {
+    1: 8448,
+    2: 3840,
+}
+
 
 class LdpcInConfig(ctypes.Structure):
+    """ctypes mirror of ldpc_in_config_t in c_lib/nr_ldpc.h."""
+
     _fields_ = [
         ("bgn", ctypes.c_uint16),
         ("A", ctypes.c_uint16),
@@ -27,6 +44,8 @@ class LdpcInConfig(ctypes.Structure):
 
 
 class DecoderConfig(ctypes.Structure):
+    """ctypes mirror of decoder_config_t in c_lib/nr_ldpc.h."""
+
     _fields_ = [
         ("algo", ctypes.c_uint16),
         ("max_iterations", ctypes.c_uint16),
@@ -115,6 +134,8 @@ def format_coderate(coderate, max_denominator=1000):
 
 def make_ldpc_config(Qm, rv, B, coderate, bgn, crctype):
     """Build one LDPC input configuration for a BLER sweep point."""
+    # The simulation grid uses B, matching 38.212 notation after CRC. The C
+    # encoder API wants A, the payload length before CRC, so derive it here.
     A = B - 16 if crctype == 0 else B - 24
     E = int(B / coderate)
 
@@ -134,14 +155,73 @@ def get_crc_length(crctype):
     return 16 if crctype == 0 else 24
 
 
+def get_config_grid_rejection_reason(Qm, rv, B, coderate, bgn, crctype):
+    """Return why a grid tuple is unsupported, or None if it is usable."""
+    # The grid is often built from broad lists. Reject impossible combinations
+    # early so the reported "Generated N configurations" reflects runnable work.
+    if Qm not in VALID_QM:
+        return f"Qm must be one of {sorted(VALID_QM)}"
+    if rv not in VALID_RV:
+        return f"rv must be one of {sorted(VALID_RV)}"
+    if bgn not in VALID_BGN:
+        return f"bgn must be one of {sorted(VALID_BGN)}"
+    if crctype not in VALID_CRCTYPE:
+        return f"crctype must be one of {sorted(VALID_CRCTYPE)}"
+    if coderate <= 0 or coderate > 1:
+        return "coderate must be in the range (0, 1]"
+    if B <= get_crc_length(crctype):
+        return "B must be larger than the selected CRC length"
+
+    A = B - get_crc_length(crctype)
+    if A % 8 != 0:
+        return "A, derived as B minus CRC length, must be a multiple of 8"
+    if B > MAX_B_BY_BGN[bgn]:
+        return f"BG{bgn} supports B <= {MAX_B_BY_BGN[bgn]}"
+
+    # Rate matching emits E bits, which are interleaved by modulation order.
+    # E must therefore be a valid codeword length and align to Qm.
+    E = int(B / coderate)
+    if E < B:
+        return "E, derived as int(B / coderate), must be at least B"
+    if E % Qm != 0:
+        return "E, derived as int(B / coderate), must be a multiple of Qm"
+
+    return None
+
+
 def make_config_grid(Qm_list, rv_list, B_list, coderate_list, bgn_list,
-    crctype_list):
-    """Return the Cartesian product of LDPC test parameters."""
-    return list(
-        itertools.product(
-            Qm_list, rv_list, B_list, coderate_list, bgn_list, crctype_list
+    crctype_list, strict=False):
+    """Return the supported Cartesian product of LDPC test parameters."""
+    config_grid = []
+    skipped_reasons = {}
+
+    for config_tuple in itertools.product(
+        Qm_list, rv_list, B_list, coderate_list, bgn_list, crctype_list
+    ):
+        reason = get_config_grid_rejection_reason(*config_tuple)
+        if reason is None:
+            config_grid.append(config_tuple)
+            continue
+
+        skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+        if strict:
+            raise ValueError(f"unsupported LDPC config {config_tuple}: {reason}")
+
+    if skipped_reasons:
+        # Group rejected tuples by reason to keep large sweeps readable.
+        reason_text = ", ".join(
+            f"{count} skipped because {reason}"
+            for reason, count in sorted(skipped_reasons.items())
         )
-    )
+        warnings.warn(
+            f"make_config_grid skipped unsupported LDPC configs: {reason_text}",
+            stacklevel=2,
+        )
+
+    if not config_grid:
+        raise ValueError("make_config_grid did not produce any supported configs")
+
+    return config_grid
 
 
 def run_ldpc_trial(libnrLDPC, ldpc_config, decoder_config_list, noise_power_db):
@@ -149,6 +229,8 @@ def run_ldpc_trial(libnrLDPC, ldpc_config, decoder_config_list, noise_power_db):
 
     Returns block-error flags and information-bit error counts for each decoder.
     """
+    # NumPy stores one bit per element for convenience. The C APIs use packed
+    # bytes at their boundaries, matching transport-block byte alignment.
     info_bits = np.random.randint(0, 2, ldpc_config.A).astype(np.uint8)
     info_bytes = np.packbits(info_bits, bitorder="big")
 
@@ -199,6 +281,8 @@ def run_bler_sweep(libnrLDPC, ldpc_config, coderate, decoder_config_list,
     for snr_power_db in snr_power_db_list:
         error_count = np.zeros(len(decoder_config_list), dtype=np.float64)
         bit_error_count = np.zeros(len(decoder_config_list), dtype=np.float64)
+        # tx_rx_process expects noise power. Convert from SNR and include Qm so
+        # different modulations use a comparable energy-per-bit convention.
         noise_power_db = -snr_power_db - 10 * np.log10(ldpc_config.Qm)
 
         for _ in range(test_num):
@@ -237,6 +321,8 @@ def run_simulation(config_grid, decoder_config_list, snr_power_db_list, test_num
     test_result = []
     for config_tuple in config_grid:
         Qm, rv, B, coderate, bgn, crctype = config_tuple
+        # Keep this historical guard for callers that pass a hand-built grid
+        # instead of using make_config_grid().
         if bgn == 2 and B > 3840:
             continue
 
@@ -248,6 +334,8 @@ def run_simulation(config_grid, decoder_config_list, snr_power_db_list, test_num
         test_result.append([config_tuple, bler_list, ber_list])
 
     with open(result_file, "wb") as f:
+        # Store the sweep metadata beside results so plotting scripts can label
+        # decoder curves and SNR points without re-importing this module.
         pickle.dump(
             (test_result, decoder_config_list, snr_power_db_list, test_num), f
         )

@@ -13,7 +13,8 @@
  * Inputs:
  *   config: Derived LDPC configuration, including E, N, K, B, F, k0, and Zc.
  *   filling_bit_value: LLR assigned to filler-bit positions.
- *   input_LLr: E received LLRs after demodulation and deinterleaving.
+ *   input_LLr: E received LLRs after demodulation, still in rate-matched
+ *       modulation-interleaved order.
  *
  * Outputs:
  *   HARQ_memory is populated with the recovered decoder input layout:
@@ -26,6 +27,8 @@ void nr_ldpc_rate_recover_harq_combine(ldpc_config_t *config, int16_t filling_bi
     uint16_t N = config->N;
     uint16_t k0 = config->k0;
     uint16_t Zc = config->Zc;
+    uint16_t Qm = config->Qm;
+    uint16_t symbols = E / Qm;
 
     // Start from a clean buffer unless this call is combining with prior HARQ data.
     if(config->HARQ_on == 0){
@@ -42,14 +45,20 @@ void nr_ldpc_rate_recover_harq_combine(ldpc_config_t *config, int16_t filling_bi
     uint16_t k=0; //index for input LLR
     uint16_t pos = k0; 
     while(k < E){
+        uint16_t bit_position = k / symbols;
+        uint16_t symbol_idx = k % symbols;
+        uint16_t llr_idx = symbol_idx * Qm + bit_position;
+
         // Information/systematic region after the punctured first 2*Zc bits.
         if(pos < config->B - 2*Zc){ 
-            HARQ_memory[pos+2*Zc] += input_LLr[k++]; // HARQ combining: sum LLRs.
+            HARQ_memory[pos+2*Zc] += input_LLr[llr_idx]; // HARQ combining: sum LLRs.
+            k++;
         }
 
         // Parity region. Positions between B-2*Zc and K-2*Zc are filler bits.
         else if(pos >= config->K - 2*Zc){
-            HARQ_memory[pos+2*Zc] += input_LLr[k++]; // HARQ combining: sum LLRs.
+            HARQ_memory[pos+2*Zc] += input_LLr[llr_idx]; // HARQ combining: sum LLRs.
+            k++;
         }
         pos = (pos + 1) % N; // Next position in the circular buffer.
     }

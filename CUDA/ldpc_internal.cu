@@ -113,20 +113,21 @@ int gen_ldpc_parameters(ldpc_config_t *params, ldpc_in_config_t *inconfig ) {
         fprintf(stderr, "Invalid A value: %d. Must be a multiple of 8.\n", A);
         return -1; // Invalid A value
     }
-    if(bgn==1 && A>8448-24){
-        fprintf(stderr, "Invalid A value: %d for BG1. Must be less than or equal to 8424.\n", A);
-        return -1; // Invalid A value for BG1
-    }
-    if(bgn==2 && A>3840-24){
-        fprintf(stderr, "Invalid A value: %d for BG2. Must be less than or equal to 3816.\n", A);
-        return -1; // Invalid A value for BG2
-    }
-
+    
     // Derive parameters based on input
     if(crctype == 0){
         params->B = A + 16; // Add 16 bits for CRC16
     } else {
         params->B = A + 24; // Add 24 bits for CRC
+    }
+
+    if(bgn==1 && params->B>8448){
+        fprintf(stderr, "Invalid A value: %d for BG1. B Must be less than or equal to 8448.\n", A);
+        return -1; // Invalid A value for BG1
+    }
+    if(bgn==2 && params->B>3840){
+        fprintf(stderr, "Invalid A value: %d for BG2. B Must be less than or equal to 3840.\n", A);
+        return -1; // Invalid A value for BG2
     }
 
     //find Zc and iLS based on B and bgn

@@ -58,6 +58,7 @@ static __global__ void cuda_rate_recover_kernel(
     uint16_t B,
     uint16_t K,
     uint16_t F,
+    uint16_t Qm,
     int16_t filling_bit_value)
 {
     uint32_t pos = blockIdx.x * blockDim.x + threadIdx.x;
@@ -91,9 +92,13 @@ static __global__ void cuda_rate_recover_kernel(
     }
 
     uint32_t selected_idx = (compact_pos + compact_N - compact_k0) % compact_N;
+    uint32_t symbols = (uint32_t)E / (uint32_t)Qm;
     int32_t llr_sum = 0;
     for (uint32_t k = selected_idx; k < E; k += compact_N) {
-        llr_sum += input_llr[k];
+        uint32_t bit_position = k / symbols;
+        uint32_t symbol_idx = k % symbols;
+        uint32_t llr_idx = symbol_idx * (uint32_t)Qm + bit_position;
+        llr_sum += input_llr[llr_idx];
     }
 
     harq_memory[pos + 2u * (uint32_t)Zc] =
@@ -141,6 +146,7 @@ int32_t cuda_nr_ldpc_rate_recover_harq_combine(
         config->B,
         config->K,
         config->F,
+        config->Qm,
         filling_bit_value);
     CUDA_CHECK_RATE_RECOVER_INT(cudaGetLastError());
 

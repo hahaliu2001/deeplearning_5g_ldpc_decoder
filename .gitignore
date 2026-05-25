@@ -4,7 +4,7 @@ __pycache__/
 *$py.class
 
 # C extensions
-*.so
+#*.so
 
 # Distribution / packaging
 .Python
@@ -218,4 +218,4 @@ __marimo__/
 .streamlit/secrets.toml
 .output/
 c_lib/*.o
-c_lib/*.so
+# c_lib/*.so
