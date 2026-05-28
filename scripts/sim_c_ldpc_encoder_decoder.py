@@ -18,10 +18,18 @@ if 0:
     BGN_LIST = [1,2]
     CRCTYPE_LIST = [0,1,2,3]
 
-if 1:
+if 0:
     Qm_LIST = [1,2,4,6,8]
     RV_LIST = [0]
     B_LIST = [3840]
+    CODERATE_LIST = [1/3]
+    BGN_LIST = [1]
+    CRCTYPE_LIST = [0]
+
+if 1:
+    Qm_LIST = [1]
+    RV_LIST = [0]
+    B_LIST = [128]
     CODERATE_LIST = [1/3]
     BGN_LIST = [1]
     CRCTYPE_LIST = [0]
@@ -30,7 +38,7 @@ if 1:
 # Channel and Monte Carlo settings. Each SNR value runs TEST_NUM random blocks,
 # so increasing either list length or TEST_NUM scales runtime linearly.
 # noise_power_db = -snr_power_db - 10 * np.log10(ldpc_config["Qm"])
-SNR_POWER_DB_LIST = np.arange(-5, 1.5, 0.2)
+SNR_POWER_DB_LIST = np.arange(-5, 2, 0.2)
 TEST_NUM = 2000
 
 
